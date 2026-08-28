@@ -26,6 +26,45 @@ import tempfile
 CRLF = "\r\n"
 
 
+WORKFLOW = """
+the read/edit pairing:
+
+  `read` prints a content hash. `edit --expect-hash` takes it back and refuses
+  to write if the file no longer hashes to it. A file that moved between your
+  read and your write is then refused rather than silently overwritten -- the
+  check `sed -i` cannot have.
+
+    $ scalpel read src/parser.rs
+    # scalpel 4f3a9c2b... src/parser.rs
+    1\tuse std::fmt;
+
+    $ scalpel edit src/parser.rs --expect-hash 4f3a9c2b... <<'EOF'
+    [{"old": "fn parse(", "new": "fn parse_expr("}]
+    EOF
+
+see `scalpel edit --help` for the edit format.
+"""
+
+EDIT_FORMAT = """
+edits arrive on stdin as a JSON array:
+
+    [{"old": "exact text", "new": "replacement"},
+     {"old": "...", "new": "...", "replace_all": true}]
+
+`old` must match exactly and appear exactly once, unless `replace_all` is set.
+Edits apply in order, each seeing what the one before it wrote. All of them
+apply or none do: a failed batch writes nothing at all, and says where the
+match nearly landed -- the line of a whitespace-only difference, every line of
+an ambiguous match, or CRLF against LF.
+
+A single edit object is accepted in place of a one-element array.
+
+exit codes:
+  2   an edit did not apply (not found, ambiguous, empty, or a no-op)
+  3   --expect-hash did not match; the file changed since you read it
+"""
+
+
 def die(msg, code=1):
     print(f"scalpel: {msg}", file=sys.stderr)
     sys.exit(code)
@@ -272,7 +311,9 @@ def cmd_edit(args):
 def main():
     p = argparse.ArgumentParser(
         prog="scalpel",
-        description="Batch exact-match edits to one file, applied atomically.")
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Batch exact-match edits to one file, applied atomically.",
+        epilog=WORKFLOW)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("read", help="print a content hash, then the file")
@@ -285,7 +326,9 @@ def main():
     h.add_argument("file")
     h.set_defaults(fn=cmd_hash)
 
-    e = sub.add_parser("edit", help="apply JSON edits from stdin")
+    e = sub.add_parser("edit", help="apply JSON edits from stdin",
+                       formatter_class=argparse.RawDescriptionHelpFormatter,
+                       epilog=EDIT_FORMAT)
     e.add_argument("file")
     e.add_argument("--expect-hash", metavar="SHA",
                    help="refuse if the file no longer hashes to this")
