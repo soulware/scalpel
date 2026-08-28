@@ -39,7 +39,7 @@ scalpel is the middle: batch the calls, keep the properties.
 
 ```
 scalpel read FILE [--offset N] [--limit N]     hash, then numbered content
-scalpel hash FILE                              hash alone
+scalpel digest FILE                            the hash alone
 scalpel edit FILE [--expect-hash H] [--dry-run]  edits as JSON on stdin
 ```
 

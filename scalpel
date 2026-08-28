@@ -264,7 +264,7 @@ def cmd_read(args):
     return 0
 
 
-def cmd_hash(args):
+def cmd_digest(args):
     print(digest(read_file(args.file)))
     return 0
 
@@ -340,9 +340,9 @@ def main():
     r.add_argument("--limit", type=int, default=None, help="how many lines")
     r.set_defaults(fn=cmd_read)
 
-    h = sub.add_parser("hash", help="print the content hash alone")
+    h = sub.add_parser("digest", help="print the content hash alone")
     h.add_argument("file")
-    h.set_defaults(fn=cmd_hash)
+    h.set_defaults(fn=cmd_digest)
 
     e = sub.add_parser("edit", help="apply JSON edits from stdin",
                        formatter_class=argparse.RawDescriptionHelpFormatter,

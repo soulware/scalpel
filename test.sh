@@ -109,7 +109,7 @@ print -r -- "compare-and-swap"
 
 f=$(fixture cas.txt 'original
 ')
-h=$("$SCALPEL" hash "$f")
+h=$("$SCALPEL" digest "$f")
 "$SCALPEL" edit "$f" --expect-hash "$h" > /dev/null <<'EOF'
 [{"old": "original", "new": "edited"}]
 EOF
@@ -117,7 +117,7 @@ check "correct hash is accepted" 'edited' "$(cat "$f")"
 
 f=$(fixture len.txt 'x
 ')
-h=$("$SCALPEL" hash "$f")
+h=$("$SCALPEL" digest "$f")
 check "hash is 12 characters" "12" "${#h}"
 
 # A longer prefix has to keep working, so a full digest from sha256sum, or one
@@ -152,7 +152,7 @@ EOF
 
 f=$(fixture stale.txt 'original
 ')
-h=$("$SCALPEL" hash "$f")
+h=$("$SCALPEL" digest "$f")
 print -rn -- 'somebody else wrote this
 ' > "$f"          # the linter, the user, another session
 out=$("$SCALPEL" edit "$f" --expect-hash "$h" 2>&1 <<'EOF'
@@ -166,12 +166,12 @@ check "stale hash leaves file alone" 'somebody else wrote this' "$(cat "$f")"
   && ok "stale hash explains itself" \
   || no "stale hash explains itself" "$out"
 
-# `read` must emit the same hash `edit` will demand, or the pairing is broken.
+# `read` must emit the same digest `edit` will demand, or the pairing is broken.
 f=$(fixture pair.txt 'content
 ')
 rh=$("$SCALPEL" read "$f" | head -1 | awk '{print $3}')
-hh=$("$SCALPEL" hash "$f")
-check "read and hash agree" "$hh" "$rh"
+hh=$("$SCALPEL" digest "$f")
+check "read and digest agree" "$hh" "$rh"
 
 # --- diagnostics -------------------------------------------------------------
 print -r -- ""
