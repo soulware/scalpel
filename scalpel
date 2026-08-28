@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""scalpel — batch exact-match edits to one file, applied atomically.
+
+Two verbs, and the pairing between them is the point:
+
+    scalpel read FILE                     prints a content hash, then the file
+    scalpel edit FILE --expect-hash H     applies edits, or refuses
+
+`read` hands back the token that `edit` demands. That is compare-and-swap: the
+hash is the version you saw, and an edit carrying a stale one is refused rather
+than silently discarding whatever moved the file underneath you.
+
+A shell rewrite (`sed -i`, `perl -pi`) has no such check. It succeeds on a file
+that changed, succeeds on a pattern that matched the wrong place, and succeeds
+when it matched nothing at all.
+"""
+
+import argparse
+import difflib
+import hashlib
+import json
+import os
+import sys
+import tempfile
+
+CRLF = "\r\n"
+
+
+def die(msg, code=1):
+    print(f"scalpel: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def read_file(path):
+    """Read preserving byte-exact line endings.
+
+    newline='' stops Python translating CRLF to LF on the way in, so what we
+    match against is what is actually on disk. A file that mixes endings is then
+    matchable only by a pattern that mixes them the same way — which is correct,
+    and is why diagnose() checks endings first.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            return f.read()
+    except FileNotFoundError:
+        die(f"{path}: no such file")
+    except IsADirectoryError:
+        die(f"{path}: is a directory")
+    except UnicodeDecodeError:
+        die(f"{path}: not valid UTF-8; scalpel only edits text")
+
+
+def digest(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def line_of(text, offset):
+    return text.count("\n", 0, offset) + 1
+
+
+def find_all(hay, needle):
+    """Non-overlapping occurrences, matching str.replace semantics.
+
+    Overlapping counts would report `aaa` as ambiguous inside `aaaa`, which is
+    true but never what the caller means.
+    """
+    out, i = [], hay.find(needle)
+    while i != -1:
+        out.append(i)
+        i = hay.find(needle, i + len(needle))
+    return out
+
+
+def diagnose(text, old):
+    """Say where `old` nearly matched, and how it differed.
+
+    This is the whole reason to prefer a tool over a raw rewrite. "not found"
+    costs a re-read to resolve; "matches at line 240 but the whitespace differs"
+    costs nothing.
+    """
+    # Line endings first: invisible, and the most common single cause.
+    if CRLF in text and CRLF not in old and old.replace("\n", CRLF) in text:
+        return "file uses CRLF line endings, your old text uses LF"
+    if CRLF in old and CRLF not in text and old.replace(CRLF, "\n") in text:
+        return "file uses LF line endings, your old text uses CRLF"
+
+    old_lines = old.split("\n")
+    file_lines = text.split("\n")
+    n = len(old_lines)
+    o_strip = [l.strip() for l in old_lines]
+    f_strip = [l.strip() for l in file_lines]
+
+    # Same lines, different leading/trailing whitespace.
+    if n <= len(file_lines):
+        for i in range(len(file_lines) - n + 1):
+            if f_strip[i:i + n] == o_strip:
+                return f"matches at line {i + 1} but the whitespace differs"
+
+    # Anchor on the first non-blank line, then score the window it starts.
+    anchor = next((s for s in o_strip if s), None)
+    best_ratio, best_at = 0.0, None
+    if anchor:
+        for i, s in enumerate(f_strip):
+            if s != anchor:
+                continue
+            window = "\n".join(file_lines[i:i + n])
+            r = difflib.SequenceMatcher(None, old, window).ratio()
+            if r > best_ratio:
+                best_ratio, best_at = r, i
+        # No exact anchor line: fall back to the closest one there is.
+        if best_at is None:
+            close = difflib.get_close_matches(
+                anchor, [s for s in f_strip if s], n=1, cutoff=0.6
+            )
+            if close:
+                best_at = f_strip.index(close[0])
+                window = "\n".join(file_lines[best_at:best_at + n])
+                best_ratio = difflib.SequenceMatcher(None, old, window).ratio()
+
+    if best_at is None:
+        return "no similar text found"
+
+    window = "\n".join(file_lines[best_at:best_at + n])
+    diff = difflib.unified_diff(
+        old.split("\n"), window.split("\n"),
+        fromfile="yours", tofile=f"file:{best_at + 1}", lineterm="", n=1,
+    )
+    body = "\n".join("    " + d for d in list(diff)[2:][:12])
+    return (f"closest match at line {best_at + 1} "
+            f"({int(best_ratio * 100)}% similar)\n{body}")
+
+
+def apply_edits(text, edits):
+    """Apply edits sequentially to an in-memory buffer.
+
+    Sequential, so a later edit sees what an earlier one wrote — the same
+    semantics as editing one hunk at a time. In memory, so a failure at edit 7
+    leaves the file untouched rather than half-rewritten. Those two properties
+    are the reason this is not a loop around sed.
+
+    Returns (new_text, report_lines) or (None, error_message).
+    """
+    buf = text
+    report = []
+    for idx, e in enumerate(edits, 1):
+        if not isinstance(e, dict) or "old" not in e or "new" not in e:
+            return None, f"edit {idx}: needs an object with 'old' and 'new'"
+        old, new = e["old"], e["new"]
+        if not isinstance(old, str) or not isinstance(new, str):
+            return None, f"edit {idx}: 'old' and 'new' must be strings"
+        if old == "":
+            return None, f"edit {idx}: 'old' is empty"
+        if old == new:
+            return None, f"edit {idx}: 'old' and 'new' are identical"
+
+        hits = find_all(buf, old)
+        if not hits:
+            return None, f"edit {idx}: not found — {diagnose(buf, old)}"
+
+        if e.get("replace_all"):
+            lines = [line_of(buf, h) for h in hits]
+            buf = buf.replace(old, new)
+            shown = ", ".join(str(x) for x in lines[:8])
+            more = "" if len(lines) <= 8 else f", +{len(lines) - 8} more"
+            report.append(f"  edit {idx}: {len(hits)} replacements "
+                          f"(lines {shown}{more})")
+        elif len(hits) > 1:
+            shown = ", ".join(str(line_of(buf, h)) for h in hits[:8])
+            more = "" if len(hits) <= 8 else f", +{len(hits) - 8} more"
+            return None, (f"edit {idx}: {len(hits)} matches (lines {shown}{more})"
+                          f" — add surrounding context, or set"
+                          f" \"replace_all\": true")
+        else:
+            report.append(f"  edit {idx}: line {line_of(buf, hits[0])}")
+            buf = buf[:hits[0]] + new + buf[hits[0] + len(old):]
+
+    return buf, report
+
+
+def write_atomic(path, text):
+    """Replace via a temp file in the same directory, so the swap is atomic.
+
+    Same directory because os.replace is only atomic within a filesystem. A
+    crash mid-write leaves the original intact, never a truncated file.
+    """
+    d = os.path.dirname(os.path.abspath(path))
+    mode = os.stat(path).st_mode & 0o7777
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".scalpel-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def cmd_read(args):
+    text = read_file(args.file)
+    print(f"# scalpel {digest(text)} {args.file}")
+    lines = text.split("\n")
+    start = max(1, args.offset)
+    if start > len(lines):
+        return 0
+    end = len(lines) if args.limit is None else min(len(lines), start + args.limit - 1)
+    width = len(str(end))
+    for i in range(start, end + 1):
+        print(f"{str(i).rjust(width)}\t{lines[i - 1]}")
+    return 0
+
+
+def cmd_hash(args):
+    print(digest(read_file(args.file)))
+    return 0
+
+
+def cmd_edit(args):
+    text = read_file(args.file)
+
+    # The version check, before anything else looks at the content.
+    if args.expect_hash:
+        actual = digest(text)
+        if actual != args.expect_hash:
+            die(f"{args.file} changed since you read it\n"
+                f"  expected {args.expect_hash[:16]}...\n"
+                f"  actual   {actual[:16]}...\n"
+                f"  re-read the file; something else wrote it "
+                f"(you, a linter, a hook, another session)", 3)
+
+    raw = sys.stdin.read().strip()
+    if not raw:
+        die("no edits on stdin; expected a JSON array of {\"old\", \"new\"}")
+    try:
+        edits = json.loads(raw)
+    except json.JSONDecodeError as ex:
+        die(f"stdin is not valid JSON: {ex}")
+    if isinstance(edits, dict):
+        edits = [edits]
+    if not isinstance(edits, list) or not edits:
+        die("expected a non-empty JSON array of edits")
+
+    result, report = apply_edits(text, edits)
+    if result is None:
+        die(f"{report}\n  nothing was written", 2)
+
+    if result == text:
+        die("edits produced no change", 2)
+
+    if args.dry_run:
+        diff = difflib.unified_diff(
+            text.split("\n"), result.split("\n"),
+            fromfile=f"a/{args.file}", tofile=f"b/{args.file}", lineterm="",
+        )
+        print("\n".join(diff))
+        print(f"scalpel: {len(edits)} edits would apply "
+              f"(dry run, nothing written)", file=sys.stderr)
+        return 0
+
+    write_atomic(args.file, result)
+    plural = "edit" if len(edits) == 1 else "edits"
+    print(f"scalpel: {len(edits)} {plural} applied to {args.file}")
+    for line in report:
+        print(line)
+    print(f"# scalpel {digest(result)} {args.file}")
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="scalpel",
+        description="Batch exact-match edits to one file, applied atomically.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("read", help="print a content hash, then the file")
+    r.add_argument("file")
+    r.add_argument("--offset", type=int, default=1, help="first line (1-based)")
+    r.add_argument("--limit", type=int, default=None, help="how many lines")
+    r.set_defaults(fn=cmd_read)
+
+    h = sub.add_parser("hash", help="print the content hash alone")
+    h.add_argument("file")
+    h.set_defaults(fn=cmd_hash)
+
+    e = sub.add_parser("edit", help="apply JSON edits from stdin")
+    e.add_argument("file")
+    e.add_argument("--expect-hash", metavar="SHA",
+                   help="refuse if the file no longer hashes to this")
+    e.add_argument("--dry-run", action="store_true",
+                   help="print a unified diff, write nothing")
+    e.set_defaults(fn=cmd_edit)
+
+    args = p.parse_args()
+    sys.exit(args.fn(args))
+
+
+if __name__ == "__main__":
+    main()
