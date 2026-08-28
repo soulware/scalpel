@@ -115,6 +115,41 @@ h=$("$SCALPEL" hash "$f")
 EOF
 check "correct hash is accepted" 'edited' "$(cat "$f")"
 
+f=$(fixture len.txt 'x
+')
+h=$("$SCALPEL" hash "$f")
+check "hash is 12 characters" "12" "${#h}"
+
+# A longer prefix has to keep working, so a full digest from sha256sum, or one
+# taken before the hash was shortened, is still a usable token.
+f=$(fixture caslong.txt 'original
+')
+full=$(shasum -a 256 "$f" | cut -d' ' -f1)
+"$SCALPEL" edit "$f" --expect-hash "$full" > /dev/null <<'EOF'
+[{"old": "original", "new": "edited"}]
+EOF
+check "full-length hash is accepted" 'edited' "$(cat "$f")"
+
+# Short enough to collide by accident is worse than no check, because it reads
+# as one.
+f=$(fixture casshort.txt 'original
+')
+out=$("$SCALPEL" edit "$f" --expect-hash abc 2>&1 <<'EOF'
+[{"old": "original", "new": "edited"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"at least 8 hex"* ]] \
+  && ok "too-short hash is refused" || no "too-short hash is refused" "$out"
+
+f=$(fixture casjunk.txt 'original
+')
+out=$("$SCALPEL" edit "$f" --expect-hash "not-a-hex-string" 2>&1 <<'EOF'
+[{"old": "original", "new": "edited"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"hex"* ]] \
+  && ok "non-hex hash is refused" || no "non-hex hash is refused" "$out"
+
 f=$(fixture stale.txt 'original
 ')
 h=$("$SCALPEL" hash "$f")

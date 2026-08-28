@@ -35,10 +35,10 @@ the read/edit pairing:
   check `sed -i` cannot have.
 
     $ scalpel read src/parser.rs
-    # scalpel 4f3a9c2b... src/parser.rs
+    # scalpel 4f3a9c2b1e8d src/parser.rs
     1\tuse std::fmt;
 
-    $ scalpel edit src/parser.rs --expect-hash 4f3a9c2b... <<'EOF'
+    $ scalpel edit src/parser.rs --expect-hash 4f3a9c2b1e8d <<'EOF'
     [{"old": "fn parse(", "new": "fn parse_expr("}]
     EOF
 
@@ -89,8 +89,20 @@ def read_file(path):
         die(f"{path}: not valid UTF-8; scalpel only edits text")
 
 
-def digest(text):
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+# 12 hex characters is 48 bits. This hash guards against a file changing by
+# accident between a read and a write -- an editor, a formatter on save, another
+# session -- not against an adversary constructing a collision. One in 2.8e14
+# against accident is already far past the point where more characters buy
+# anything, and the full 64 would be printed once and typed back once on every
+# single edit.
+#
+# A longer prefix is still accepted, so a hash taken before this was shortened,
+# or a full digest from sha256sum, keeps working.
+SHORT = 12
+
+
+def digest(text, n=SHORT):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:n]
 
 
 def line_of(text, offset):
@@ -262,11 +274,17 @@ def cmd_edit(args):
 
     # The version check, before anything else looks at the content.
     if args.expect_hash:
-        actual = digest(text)
-        if actual != args.expect_hash:
+        want = args.expect_hash.strip().lower()
+        if len(want) < 8 or want.strip("0123456789abcdef"):
+            die("--expect-hash wants at least 8 hex characters, "
+                "as printed by `scalpel read`")
+        # Compared at whatever length was supplied, so a full digest and a short
+        # one are both simply equality against the same prefix.
+        actual = digest(text, len(want))
+        if actual != want:
             die(f"{args.file} changed since you read it\n"
-                f"  expected {args.expect_hash[:16]}...\n"
-                f"  actual   {actual[:16]}...\n"
+                f"  expected {want}\n"
+                f"  actual   {actual}\n"
                 f"  re-read the file; something else wrote it "
                 f"(you, a linter, a hook, another session)", 3)
 

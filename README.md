@@ -45,12 +45,12 @@ scalpel edit FILE [--expect-hash H] [--dry-run]  edits as JSON on stdin
 
 ```console
 $ scalpel read src/parser.rs --limit 3
-# scalpel 4f3a9c2b1e8d... src/parser.rs
+# scalpel 4f3a9c2b1e8d src/parser.rs
 1	use std::fmt;
 2	
 3	pub struct Parser {
 
-$ scalpel edit src/parser.rs --expect-hash 4f3a9c2b1e8d... <<'EOF'
+$ scalpel edit src/parser.rs --expect-hash 4f3a9c2b1e8d <<'EOF'
 [{"old": "fn parse(", "new": "fn parse_expr("},
  {"old": "// TODO: handle nesting", "new": "// handled below"},
  {"old": "debug!(", "new": "trace!(", "replace_all": true}]
@@ -59,7 +59,7 @@ scalpel: 3 edits applied to src/parser.rs
   edit 1: line 44
   edit 2: line 91
   edit 3: 4 replacements (lines 12, 58, 103, 140)
-# scalpel 9b2e77c04a1f... src/parser.rs
+# scalpel 9b2e77c04a1f src/parser.rs
 ```
 
 Each edit is an object with `old` and `new`, and optionally `replace_all`.
@@ -87,6 +87,13 @@ check that change is silently discarded.
 The check is optional, because sometimes you genuinely are creating the content
 you are about to match. But omitting it forfeits the only guarantee here that
 you cannot reconstruct by being careful.
+
+The hash is the first 12 characters of a SHA-256, because what it guards against
+is a file changing by accident — an editor, a formatter on save, another session
+— rather than an adversary constructing a collision. 48 bits is one in 2.8e14
+against accident, well past the point where more characters buy anything, and
+the full 64 would be printed once and typed back once on every edit. A longer
+prefix is still accepted, so a full digest from `sha256sum` also works.
 
 ## Diagnostics
 
@@ -165,8 +172,8 @@ create. Use a heredoc; there is nothing to batch and nothing to verify.
 ./test.sh
 ```
 
-26 checks, no dependencies beyond zsh and python3. The ones that matter are
-negative — nothing was written, the edit was refused, the mode was preserved —
+No dependencies beyond zsh and python3. The checks that matter are the negative
+ones — nothing was written, the edit was refused, the mode was preserved —
 because those are the claims that rot without anyone noticing.
 
 ## Licence
