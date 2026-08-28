@@ -49,9 +49,18 @@ EDIT_FORMAT = """
 edits arrive on stdin as a JSON array:
 
     [{"old": "exact text", "new": "replacement"},
-     {"old": "...", "new": "...", "replace_all": true}]
+     {"old": "...", "new": "...", "replace_all": true},
+     {"append": "text for the end of the file"},
+     {"prepend": "text for the start"}]
 
 `old` must match exactly and appear exactly once, unless `replace_all` is set.
+
+`append` and `prepend` carry their text directly and take no `old`: the end and
+the start of a file are the two positions that name one place by construction,
+so they need nothing quoted to be unambiguous. The text goes in byte for byte
+-- carry your own newlines -- and an insert that would run into an existing
+line is refused rather than glued on.
+
 Edits apply in order, each seeing what the one before it wrote. All of them
 apply or none do: a failed batch writes nothing at all, and says where the
 match nearly landed -- the line of a whitespace-only difference, every line of
@@ -181,6 +190,55 @@ def diagnose(text, old):
             f"({int(best_ratio * 100)}% similar)\n{body}")
 
 
+def insert(buf, where, edit, idx):
+    """Add text at one of the two positions that need no anchor.
+
+    The end of a file and the start of a file each name exactly one place by
+    construction, so they keep the property `old` buys by quoting the file:
+    there is no second candidate to land on by mistake. What they cannot check
+    is the seam, so the ways a seam silently corrupts are refused outright.
+
+    Returns (buf, report_line, None) or (buf, None, error).
+    """
+    if "new" in edit:
+        return buf, None, (f"edit {idx}: '{where}' carries the text itself; "
+                           f"there is no 'new'")
+    if edit.get("replace_all"):
+        return buf, None, (f"edit {idx}: 'replace_all' means nothing "
+                           f"with '{where}'")
+    add = edit[where]
+    if not isinstance(add, str):
+        return buf, None, f"edit {idx}: '{where}' must be a string"
+    if add == "":
+        return buf, None, f"edit {idx}: '{where}' is empty"
+
+    # Inserted byte for byte. No newline is added for you: guessing one is the
+    # sort of silent adjustment this tool exists to avoid, and a caller who
+    # wants a blank line above a new function must be able to ask for one. The
+    # seam is checked instead -- text that would run into an existing line is
+    # refused, because that is the failure that looks like success.
+    if buf:
+        if CRLF in buf and CRLF not in add and "\n" in add:
+            return buf, None, (f"edit {idx}: file uses CRLF line endings, "
+                               f"your '{where}' text uses LF")
+        if where == "append" and not buf.endswith("\n") and not add.startswith("\n"):
+            return buf, None, (
+                f"edit {idx}: the file has no trailing newline, so this would "
+                f"continue line {line_of(buf, len(buf))} -- begin the text with "
+                f"a newline, or anchor an 'old'/'new' edit on that line")
+        if where == "prepend" and not add.endswith("\n"):
+            return buf, None, (
+                f"edit {idx}: the text has no trailing newline, so it would run "
+                f"into line 1 -- end the text with a newline, or anchor an "
+                f"'old'/'new' edit on that line")
+
+    at = len(buf) if where == "append" else 0
+    buf = buf[:at] + add + buf[at:]
+    n = add.count("\n") + (0 if add.endswith("\n") else 1)
+    return buf, (f"  edit {idx}: {where}ed {n} "
+                 f"{'line' if n == 1 else 'lines'} at line {line_of(buf, at)}"), None
+
+
 def apply_edits(text, edits):
     """Apply edits sequentially to an in-memory buffer.
 
@@ -194,8 +252,27 @@ def apply_edits(text, edits):
     buf = text
     report = []
     for idx, e in enumerate(edits, 1):
-        if not isinstance(e, dict) or "old" not in e or "new" not in e:
-            return None, f"edit {idx}: needs an object with 'old' and 'new'"
+        if not isinstance(e, dict):
+            return None, f"edit {idx}: needs an object"
+
+        # Exactly one way of saying where. `old` says it by quoting the file;
+        # `append` and `prepend` say it by naming a position that cannot be
+        # ambiguous. Two of them in one object is a caller who meant neither.
+        keys = [k for k in ("old", "append", "prepend") if k in e]
+        if len(keys) != 1:
+            found = ", ".join(f"'{k}'" for k in keys) if keys else "none"
+            return None, (f"edit {idx}: needs exactly one of 'old', 'append', "
+                          f"'prepend' -- found {found}")
+
+        if keys[0] != "old":
+            buf, line, err = insert(buf, keys[0], e, idx)
+            if err:
+                return None, err
+            report.append(line)
+            continue
+
+        if "new" not in e:
+            return None, f"edit {idx}: 'old' needs a matching 'new'"
         old, new = e["old"], e["new"]
         if not isinstance(old, str) or not isinstance(new, str):
             return None, f"edit {idx}: 'old' and 'new' must be strings"

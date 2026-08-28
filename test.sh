@@ -284,6 +284,128 @@ check "dry run writes nothing" 'before' "$(cat "$f")"
   && ok "dry run prints a diff" \
   || no "dry run prints a diff" "$out"
 
+# --- anchorless inserts ------------------------------------------------------
+print -r -- ""
+print -r -- "appending and prepending"
+
+f=$(fixture app.txt 'alpha
+beta
+')
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"append": "gamma\n"}]
+EOF
+check "append lands at the end" 'alpha
+beta
+gamma' "$(cat "$f")"
+
+f=$(fixture pre.txt 'alpha
+beta
+')
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"prepend": "# header\n"}]
+EOF
+check "prepend lands at the start" '# header
+alpha
+beta' "$(cat "$f")"
+
+# Inserts are edits like any other: they take their turn in the batch and the
+# buffer they see is whatever the edits before them left.
+f=$(fixture mix.txt 'alpha
+beta
+')
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"prepend": "# top\n"}, {"old": "beta", "new": "BETA"}, {"append": "delta\n"}]
+EOF
+check "inserts and replacements share one batch" '# top
+alpha
+BETA
+delta' "$(cat "$f")"
+
+f=$(fixture stack.txt 'one
+')
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"append": "two\n"}, {"append": "three\n"}]
+EOF
+check "two appends stack in order" 'one
+two
+three' "$(cat "$f")"
+
+f=$(fixture empty.txt '')
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"append": "first\n"}]
+EOF
+check "append to an empty file" 'first' "$(cat "$f")"
+
+# Byte for byte: an append that omits its own newline gets no newline invented
+# for it, exactly as `old`/`new` text is taken literally.
+f=$(fixture exact.txt 'a
+')
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"append": "b"}]
+EOF
+check "no newline is invented" $'a\nb' "$(cat "$f")"
+
+# A failed insert must leave the file alone like any other failed edit.
+f=$(fixture atomic-ins.txt 'keep
+')
+"$SCALPEL" edit "$f" > /dev/null 2>&1 <<'EOF'
+[{"append": "added\n"}, {"old": "absent", "new": "x"}]
+EOF
+check "a later failure discards the append" 'keep' "$(cat "$f")"
+
+# --- insert seams ------------------------------------------------------------
+print -r -- ""
+print -r -- "refusing a seam that would corrupt"
+
+# The whole point of naming a position instead of quoting one is that it cannot
+# land in the wrong place. The one thing it cannot see is the join, so a join
+# that would silently weld two lines together is refused instead.
+f=$(fixture nonl.txt 'alpha
+beta')
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"append": "gamma\n"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"no trailing newline"* ]] \
+  && ok "append onto an unterminated last line is refused" \
+  || no "append onto an unterminated last line is refused" "$out"
+check "  ...and nothing was written" 'alpha
+beta' "$(cat "$f")"
+
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"append": "\ngamma\n"}]
+EOF
+check "  ...and the suggested fix works" 'alpha
+beta
+gamma' "$(cat "$f")"
+
+f=$(fixture prenl.txt 'alpha
+')
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"prepend": "# header"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"no trailing newline"* ]] \
+  && ok "prepend that would run into line 1 is refused" \
+  || no "prepend that would run into line 1 is refused" "$out"
+
+f=$(fixture crlf-ins.txt $'a\r\nb\r\n')
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"append": "c\n"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"CRLF"* ]] \
+  && ok "LF text appended to a CRLF file is refused" \
+  || no "LF text appended to a CRLF file is refused" "$out"
+
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"append": "c\r\n"}]
+EOF
+# Compared as bytes: command substitution eats the trailing newline but leaves
+# the carriage return, so a plain string compare here would lie.
+check "  ...CRLF text is accepted" \
+  "$(printf 'a\r\nb\r\nc\r\n' | od -c)" "$(od -c < "$f")"
+
 # --- input validation --------------------------------------------------------
 print -r -- ""
 print -r -- "rejecting bad input"
@@ -314,6 +436,44 @@ EOF
 )
 [[ $? -ne 0 && "$out" == *"no such file"* ]] \
   && ok "missing file is refused" || no "missing file is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"old": "x", "new": "y", "append": "z\n"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"exactly one of"* ]] \
+  && ok "two ways of saying where is refused" \
+  || no "two ways of saying where is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"nonsense": "y"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"exactly one of"* ]] \
+  && ok "no way of saying where is refused" \
+  || no "no way of saying where is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"append": ""}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"empty"* ]] \
+  && ok "empty append is refused" || no "empty append is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"append": "y\n", "new": "z"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"no 'new'"* ]] \
+  && ok "append with a 'new' is refused" || no "append with a 'new' is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"append": "y\n", "replace_all": true}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"means nothing"* ]] \
+  && ok "replace_all on an append is refused" \
+  || no "replace_all on an append is refused" "$out"
 
 print -r -- ""
 print -r -- "$pass passed, $fail failed"

@@ -66,6 +66,45 @@ Each edit is an object with `old` and `new`, and optionally `replace_all`.
 `old` must appear exactly once unless `replace_all` is set. A bare object is
 accepted in place of a one-element array.
 
+## Appending and prepending
+
+Two positions need no anchor, because each names exactly one place by
+construction: the end of the file and the start. An edit may carry `append` or
+`prepend` in place of `old`/`new`, holding the text directly.
+
+```console
+$ scalpel edit tests/parser.rs <<'EOF'
+[{"append": "\n#[test]\nfn parses_nested_groups() {\n    assert!(parse(\"((a))\").is_ok());\n}\n"}]
+EOF
+scalpel: 1 edit applied to tests/parser.rs
+  edit 1: appended 5 lines at line 341
+```
+
+This is the one position anchoring is genuinely bad at. A file whose last line
+is `}` has no unique tail, so the anchor must widen until it has one: across the
+same transcripts, inserts that anchored at EOF carried a median of 165
+characters of `old` to say nothing but *at the end*, and 25 further appends gave
+up and went to `cat >>`, discarding the version check to save the trouble.
+Naming the position costs neither.
+
+No newline is guessed for you. The text goes in byte for byte, exactly as `old`
+is matched byte for byte, so an `append` carries its own trailing newline — and
+its own blank separator line, if it wants one. What cannot be guessed is refused
+instead, because each of these welds two lines together and then looks like
+success:
+
+```console
+$ scalpel edit notes.md <<'EOF'
+[{"append": "one more line\n"}]
+EOF
+scalpel: edit 1: the file has no trailing newline, so this would continue line 40
+  -- begin the text with a newline, or anchor an 'old'/'new' edit on that line
+  nothing was written
+```
+
+A `prepend` whose text does not end in a newline is refused the same way, as is
+LF text inserted into a CRLF file.
+
 ## The three properties
 
 **Atomic.** Edits are applied to an in-memory buffer and the file is written
