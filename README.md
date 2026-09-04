@@ -38,17 +38,18 @@ scalpel is the middle: batch the calls, keep the properties.
 ## Use
 
 ```
-scalpel read FILE [--offset N] [--limit N]     hash, then numbered content
-scalpel digest FILE                            the hash alone
+scalpel read FILE [--lines A-B,C-D,...]          hash, then numbered content
+scalpel digest FILE                              the hash alone
 scalpel edit FILE [--expect-hash H] [--dry-run]  edits as JSON on stdin
 ```
 
 ```console
-$ scalpel read src/parser.rs --limit 3
+$ scalpel read src/parser.rs --lines 1-3,44
 # scalpel 4f3a9c2b1e8d src/parser.rs
-1	use std::fmt;
-2	
-3	pub struct Parser {
+ 1	use std::fmt;
+ 2	
+ 3	pub struct Parser {
+44	fn parse(input: &str) -> Result<Ast> {
 
 $ scalpel edit src/parser.rs --expect-hash 4f3a9c2b1e8d <<'EOF'
 [{"old": "fn parse(", "new": "fn parse_expr("},
@@ -64,7 +65,14 @@ scalpel: 3 edits applied to src/parser.rs
 
 Each edit is an object with `old` and `new`, and optionally `replace_all`.
 `old` must appear exactly once unless `replace_all` is set. A bare object is
-accepted in place of a one-element array.
+accepted in place of a one-element array. The four other ways of saying where
+-- a range between two anchors, an insert beside one, append, prepend -- each
+get a section below.
+
+`read --lines` takes any number of windows -- `A-B`, a bare `N`, or `N-` to
+the end -- and prints them in order under one hash. That is `sed -n
+'A,Bp;C,Dp'` with the version token kept, which matters most on exactly the
+files too long to read whole.
 
 ## Appending and prepending
 
@@ -97,13 +105,82 @@ success:
 $ scalpel edit notes.md <<'EOF'
 [{"append": "one more line\n"}]
 EOF
-scalpel: edit 1: the file has no trailing newline, so this would continue line 40
-  -- begin the text with a newline, or anchor an 'old'/'new' edit on that line
+scalpel: edit 1: line 40 has no trailing newline before this point, so the text
+  would continue it -- begin the text with a newline, or anchor an 'old'/'new'
+  edit on that line
   nothing was written
 ```
 
 A `prepend` whose text does not end in a newline is refused the same way, as is
 LF text inserted into a CRLF file.
+
+## Replacing a range
+
+An `old` has to quote the whole of what it replaces. That is right for a line
+or a hunk, and wrong for a sixty-line function whose head and tail you know and
+whose body is the thing being thrown away: quoting it back costs the tokens the
+edit was meant to save, and any drift in the middle is a failed match. `from`
+names the start and `to` or `until` names the end.
+
+```console
+$ scalpel edit tests/parser.rs <<'EOF'
+[{"from": "    #[test]\n    fn parses_legacy_form",
+  "until": "    #[test]\n    fn parses_nested_groups",
+  "new": ""}]
+EOF
+scalpel: 1 edit applied to tests/parser.rs
+  edit 1: lines 212-240 deleted
+```
+
+`from` obeys the same rule as `old`: it must appear exactly once. The end is
+the first `to` or `until` after it, first rather than unique because "up to
+the next test" is the idiom and the next test's header is never unique. `to`
+keeps its anchor inside the range, so `"to": "\n}\n"` replaces through a
+closing brace; `until` leaves it outside, so the next function's header stays.
+An empty `new` deletes. The report gives the span in the numbering you read.
+
+The end is searched only after `from`, so an anchor that also occurs earlier in
+the file cannot produce a range running backwards; it is reported as not found.
+
+## Inserting at an anchor
+
+An insert with `old`/`new` repeats the anchor inside `new`, once to find the
+place and once to keep it. `insert` carries the text and `before` or `after`
+carries the anchor, which must appear exactly once.
+
+```console
+$ scalpel edit src/lib.rs <<'EOF'
+[{"insert": "mod parser;\n", "after": "mod lexer;\n"}]
+EOF
+scalpel: 1 edit applied to src/lib.rs
+  edit 1: inserted 1 line after line 3
+```
+
+The text is whole lines. Both seams -- the join above the text and the join
+below it -- must land on line boundaries, or the edit is refused with the same
+message an `append` gives. An anchor that ends mid-line, `"after": "}"`, is
+fine if the text begins with a newline. To splice into the middle of a line,
+use `old`/`new`, which is what it is for.
+
+## The last occurrence
+
+The uniqueness rule has one honest exception. A tests module ends in a `}` that
+has no distinguishing context at all except that it is the last one in the
+file, and "the last one" is as definite a position as the end of the file is.
+`last: true` on `old`, `from`, `before` or `after` selects the final match in
+place of requiring a unique one.
+
+```console
+$ scalpel edit tests/parser.rs <<'EOF'
+[{"insert": "\n    #[test]\n    fn added() {\n        assert!(parse(\"a\").is_ok());\n    }\n",
+  "before": "}\n", "last": true}]
+EOF
+scalpel: 1 edit applied to tests/parser.rs
+  edit 1: inserted 5 lines before line 341 (last of 19)
+```
+
+The report says it chose, and out of how many, so a `last` that landed on the
+wrong brace is visible in the output rather than in the compiler.
 
 ## The three properties
 
@@ -143,19 +220,19 @@ The reason to prefer a tool over `sed -i` is what happens when the match fails.
 $ scalpel edit config.py <<'EOF'
 [{"old": "timeout = 30", "new": "timeout = 60"}]
 EOF
-scalpel: edit 1: not found — matches at line 12 but the whitespace differs
+scalpel: edit 1: 'old' not found — matches at line 12 but the whitespace differs
   nothing was written
 
 $ scalpel edit handler.py <<'EOF'
 [{"old": "return None", "new": "return []"}]
 EOF
-scalpel: edit 1: 3 matches (lines 22, 47, 91) — add surrounding context, or set "replace_all": true
+scalpel: edit 1: 'old' has 3 matches (lines 22, 47, 91) — add surrounding context, set "last": true, or set "replace_all": true
   nothing was written
 
 $ scalpel edit win.txt <<'EOF'
 [{"old": "alpha\nbeta", "new": "gamma"}]
 EOF
-scalpel: edit 1: not found — file uses CRLF line endings, your old text uses LF
+scalpel: edit 1: 'old' not found — file uses CRLF line endings, your text uses LF
   nothing was written
 ```
 
@@ -163,7 +240,7 @@ When none of the specific checks fire, it anchors on the first non-blank line of
 your `old`, scores candidate windows, and prints the closest with a diff:
 
 ```
-scalpel: edit 1: not found — closest match at line 88 (91% similar)
+scalpel: edit 1: 'old' not found — closest match at line 88 (91% similar)
     @@ -1,2 +1,2 @@
     -def process(self, val):
     +def process(self, value):

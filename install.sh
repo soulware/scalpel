@@ -43,16 +43,25 @@ cat <<'BLOCK'
 builtin Edit tool when making three or more changes to the same file, and over
 `sed -i` always.
 
-    scalpel read FILE                     # prints "# scalpel <hash> FILE", then content
+    scalpel read FILE [--lines A-B,C-D]   # prints "# scalpel <hash> FILE", then content
     scalpel edit FILE --expect-hash <hash> <<'EOF'
     [{"old": "...", "new": "..."},
-     {"old": "...", "new": "...", "replace_all": true}]
+     {"old": "...", "new": "...", "replace_all": true},
+     {"from": "start anchor", "until": "end anchor", "new": ""},
+     {"insert": "text\n", "after": "anchor\n"},
+     {"insert": "text\n", "before": "}\n", "last": true},
+     {"append": "text\n"}]
     EOF
 
 Pass `--expect-hash` with the hash from `scalpel read`. The edit is refused
 (exit 3) if anything wrote the file in between. All edits apply or none do; a
 failed batch writes nothing and names the line where the match nearly landed.
 Use `--dry-run` to see a diff without writing.
+
+`from`/`to`/`until` replaces a range without quoting its body; `insert` with
+`before`/`after` adds whole lines beside an anchor; `last: true` picks the
+final occurrence where the file has no unique context. `scalpel edit --help`
+carries the full format.
 
 For one or two edits, the builtin Edit tool renders a better diff in review.
 BLOCK

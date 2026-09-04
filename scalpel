@@ -24,6 +24,7 @@ import sys
 import tempfile
 
 CRLF = "\r\n"
+NEWLINES = ("\n", CRLF)
 
 
 WORKFLOW = """
@@ -34,32 +35,58 @@ the read/edit pairing:
   read and your write is then refused rather than silently overwritten -- the
   check `sed -i` cannot have.
 
-    $ scalpel read src/parser.rs
+    $ scalpel read src/parser.rs --lines 1-3,40-60
     # scalpel 4f3a9c2b1e8d src/parser.rs
-    1\tuse std::fmt;
+     1\tuse std::fmt;
+     ...
+    40\tfn parse(
 
     $ scalpel edit src/parser.rs --expect-hash 4f3a9c2b1e8d <<'EOF'
     [{"old": "fn parse(", "new": "fn parse_expr("}]
     EOF
 
-see `scalpel edit --help` for the edit format.
+  `--lines` takes any number of windows, so one call replaces
+  `sed -n 'A,Bp;C,Dp'` and keeps the hash on every slice.
+
+see `scalpel edit --help` for the edit format: exact-match replace, range
+replace between two anchors, insert before/after an anchor, append, prepend.
 """
 
 EDIT_FORMAT = """
-edits arrive on stdin as a JSON array:
+edits arrive on stdin as a JSON array. Five ways of saying where:
 
     [{"old": "exact text", "new": "replacement"},
      {"old": "...", "new": "...", "replace_all": true},
+     {"from": "fn old(", "until": "\\n#[test]", "new": ""},
+     {"from": "fn parse(", "to": "\\n}\\n", "new": "fn parse(...) {\\n    ...\\n}\\n"},
+     {"insert": "text\\n", "before": "anchor"},
+     {"insert": "text\\n", "after": "anchor"},
      {"append": "text for the end of the file"},
      {"prepend": "text for the start"}]
 
-`old` must match exactly and appear exactly once, unless `replace_all` is set.
+`old`/`new`: `old` must match exactly and appear exactly once, unless
+`replace_all` is set.
 
-`append` and `prepend` carry their text directly and take no `old`: the end and
-the start of a file are the two positions that name one place by construction,
-so they need nothing quoted to be unambiguous. The text goes in byte for byte
--- carry your own newlines -- and an insert that would run into an existing
-line is refused rather than glued on.
+`from` + `to`/`until` + `new` replaces a range. `from` must appear exactly
+once, like `old`. The range ends at the first `to` or `until` after it: `to`
+keeps its anchor inside the range, `until` leaves it outside. An empty `new`
+deletes the range. Use this when the body between two known lines is long and
+quoting it whole as `old` would be the point of the edit.
+
+`insert` + `before`/`after` puts text next to an anchor, which must appear
+exactly once. The anchor is not repeated inside the text, and the text is
+whole lines: both seams must land on line boundaries, or the edit is refused.
+Use `old`/`new` to splice into the middle of a line.
+
+`append` and `prepend` carry their text directly: the end and the start of a
+file each name one place by construction, so they need no anchor.
+
+`last: true` on `old`, `from`, `before` or `after` selects the last occurrence
+in place of the uniqueness rule -- for the closing brace of a module, say,
+which has no unique context except that it comes last.
+
+All inserted text goes in byte for byte -- carry your own newlines -- and an
+insert that would run into an existing line is refused rather than glued on.
 
 Edits apply in order, each seeing what the one before it wrote. All of them
 apply or none do: a failed batch writes nothing at all, and says where the
@@ -72,6 +99,13 @@ exit codes:
   2   an edit did not apply (not found, ambiguous, empty, or a no-op)
   3   --expect-hash did not match; the file changed since you read it
 """
+
+# Every key an edit may carry. Anything else is most likely a typo for one of
+# these, and a typo'd `until` or `last` that is silently ignored turns into a
+# different edit than the one asked for.
+KNOWN_KEYS = {"old", "new", "replace_all", "last", "from", "to", "until",
+              "insert", "before", "after", "append", "prepend"}
+WHERE_KEYS = ("old", "from", "insert", "append", "prepend")
 
 
 def die(msg, code=1):
@@ -131,18 +165,21 @@ def find_all(hay, needle):
     return out
 
 
-def diagnose(text, old):
+def diagnose(text, old, base=0):
     """Say where `old` nearly matched, and how it differed.
 
     This is the whole reason to prefer a tool over a raw rewrite. "not found"
     costs a re-read to resolve; "matches at line 240 but the whitespace differs"
     costs nothing.
+
+    `base` is added to every line number, for a caller that searched a tail of
+    the file and wants the numbers to mean lines of the whole.
     """
     # Line endings first: invisible, and the most common single cause.
     if CRLF in text and CRLF not in old and old.replace("\n", CRLF) in text:
-        return "file uses CRLF line endings, your old text uses LF"
+        return "file uses CRLF line endings, your text uses LF"
     if CRLF in old and CRLF not in text and old.replace(CRLF, "\n") in text:
-        return "file uses LF line endings, your old text uses CRLF"
+        return "file uses LF line endings, your text uses CRLF"
 
     old_lines = old.split("\n")
     file_lines = text.split("\n")
@@ -154,7 +191,7 @@ def diagnose(text, old):
     if n <= len(file_lines):
         for i in range(len(file_lines) - n + 1):
             if f_strip[i:i + n] == o_strip:
-                return f"matches at line {i + 1} but the whitespace differs"
+                return f"matches at line {base + i + 1} but the whitespace differs"
 
     # Anchor on the first non-blank line, then score the window it starts.
     anchor = next((s for s in o_strip if s), None)
@@ -183,60 +220,86 @@ def diagnose(text, old):
     window = "\n".join(file_lines[best_at:best_at + n])
     diff = difflib.unified_diff(
         old.split("\n"), window.split("\n"),
-        fromfile="yours", tofile=f"file:{best_at + 1}", lineterm="", n=1,
+        fromfile="yours", tofile=f"file:{base + best_at + 1}", lineterm="", n=1,
     )
     body = "\n".join("    " + d for d in list(diff)[2:][:12])
-    return (f"closest match at line {best_at + 1} "
+    return (f"closest match at line {base + best_at + 1} "
             f"({int(best_ratio * 100)}% similar)\n{body}")
 
 
-def insert(buf, where, edit, idx):
-    """Add text at one of the two positions that need no anchor.
+def locate(buf, key, edit, idx):
+    """Find the one place `edit[key]` names in `buf`.
 
-    The end of a file and the start of a file each name exactly one place by
-    construction, so they keep the property `old` buys by quoting the file:
-    there is no second candidate to land on by mistake. What they cannot check
-    is the seam, so the ways a seam silently corrupts are refused outright.
+    Exactly once is the rule, because a match that could have landed in two
+    places proves nothing about which one you meant. `last: true` is the one
+    relaxation: it names the final occurrence, which is a position as definite
+    as the end of the file, and is what a closing brace has instead of context.
 
-    Returns (buf, report_line, None) or (buf, None, error).
+    Returns (offset, note, None) or (None, None, error). `note` is appended to
+    the report line so the reader can see that `last` did the choosing.
     """
-    if "new" in edit:
-        return buf, None, (f"edit {idx}: '{where}' carries the text itself; "
-                           f"there is no 'new'")
-    if edit.get("replace_all"):
-        return buf, None, (f"edit {idx}: 'replace_all' means nothing "
-                           f"with '{where}'")
-    add = edit[where]
+    needle = edit[key]
+    if not isinstance(needle, str):
+        return None, None, f"edit {idx}: '{key}' must be a string"
+    if needle == "":
+        return None, None, f"edit {idx}: '{key}' is empty"
+    hits = find_all(buf, needle)
+    if not hits:
+        return None, None, f"edit {idx}: '{key}' not found — {diagnose(buf, needle)}"
+    if edit.get("last"):
+        note = "" if len(hits) == 1 else f" (last of {len(hits)})"
+        return hits[-1], note, None
+    if len(hits) > 1:
+        shown = ", ".join(str(line_of(buf, h)) for h in hits[:8])
+        more = "" if len(hits) <= 8 else f", +{len(hits) - 8} more"
+        hint = ("add surrounding context, set \"last\": true"
+                + (", or set \"replace_all\": true" if key == "old" else ""))
+        return None, None, (f"edit {idx}: '{key}' has {len(hits)} matches "
+                            f"(lines {shown}{more}) — {hint}")
+    return hits[0], "", None
+
+
+def splice_in(buf, at, add, idx, where):
+    """Put `add` into `buf` at offset `at`, refusing a seam that would corrupt.
+
+    Naming a position instead of quoting one means the edit cannot land in the
+    wrong place. What it cannot see is the join, so the two ways a join silently
+    corrupts are refused: text that would continue the line before it, and text
+    that would run into the line after it. Both look like success and both are
+    found later by a compiler, if at all.
+
+    Returns (buf, line_count, None) or (buf, None, error).
+    """
     if not isinstance(add, str):
         return buf, None, f"edit {idx}: '{where}' must be a string"
     if add == "":
         return buf, None, f"edit {idx}: '{where}' is empty"
+    if CRLF in buf and CRLF not in add and "\n" in add:
+        return buf, None, (f"edit {idx}: file uses CRLF line endings, "
+                           f"your '{where}' text uses LF")
 
     # Inserted byte for byte. No newline is added for you: guessing one is the
     # sort of silent adjustment this tool exists to avoid, and a caller who
-    # wants a blank line above a new function must be able to ask for one. The
-    # seam is checked instead -- text that would run into an existing line is
-    # refused, because that is the failure that looks like success.
-    if buf:
-        if CRLF in buf and CRLF not in add and "\n" in add:
-            return buf, None, (f"edit {idx}: file uses CRLF line endings, "
-                               f"your '{where}' text uses LF")
-        if where == "append" and not buf.endswith("\n") and not add.startswith("\n"):
-            return buf, None, (
-                f"edit {idx}: the file has no trailing newline, so this would "
-                f"continue line {line_of(buf, len(buf))} -- begin the text with "
-                f"a newline, or anchor an 'old'/'new' edit on that line")
-        if where == "prepend" and not add.endswith("\n"):
-            return buf, None, (
-                f"edit {idx}: the text has no trailing newline, so it would run "
-                f"into line 1 -- end the text with a newline, or anchor an "
-                f"'old'/'new' edit on that line")
+    # wants a blank line above a new function must be able to ask for one.
+    left_ok = at == 0 or buf[at - 1] == "\n" or add.startswith(NEWLINES)
+    if not left_ok:
+        return buf, None, (
+            f"edit {idx}: line {line_of(buf, at)} has no trailing newline "
+            f"before this point, so the text would continue it -- begin the "
+            f"text with a newline, or anchor an 'old'/'new' edit on that line")
+    right_ok = at == len(buf) or buf.startswith(NEWLINES, at) or add.endswith("\n")
+    if not right_ok:
+        return buf, None, (
+            f"edit {idx}: the text has no trailing newline, so it would run "
+            f"into line {line_of(buf, at)} -- end the text with a newline, or "
+            f"anchor an 'old'/'new' edit on that line")
 
-    at = len(buf) if where == "append" else 0
     buf = buf[:at] + add + buf[at:]
-    n = add.count("\n") + (0 if add.endswith("\n") else 1)
-    return buf, (f"  edit {idx}: {where}ed {n} "
-                 f"{'line' if n == 1 else 'lines'} at line {line_of(buf, at)}"), None
+    return buf, add.count("\n") + (0 if add.endswith("\n") else 1), None
+
+
+def plural(n, noun):
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
 def apply_edits(text, edits):
@@ -255,52 +318,137 @@ def apply_edits(text, edits):
         if not isinstance(e, dict):
             return None, f"edit {idx}: needs an object"
 
-        # Exactly one way of saying where. `old` says it by quoting the file;
-        # `append` and `prepend` say it by naming a position that cannot be
-        # ambiguous. Two of them in one object is a caller who meant neither.
-        keys = [k for k in ("old", "append", "prepend") if k in e]
+        unknown = sorted(set(e) - KNOWN_KEYS)
+        if unknown:
+            return None, (f"edit {idx}: unknown key "
+                          f"{', '.join(repr(k) for k in unknown)}")
+
+        # Exactly one way of saying where. `old` and `from` say it by quoting
+        # the file; `insert` by quoting a neighbour; `append` and `prepend` by
+        # naming a position that cannot be ambiguous. Two of them in one
+        # object is a caller who meant neither.
+        keys = [k for k in WHERE_KEYS if k in e]
         if len(keys) != 1:
             found = ", ".join(f"'{k}'" for k in keys) if keys else "none"
-            return None, (f"edit {idx}: needs exactly one of 'old', 'append', "
-                          f"'prepend' -- found {found}")
+            return None, (f"edit {idx}: needs exactly one of "
+                          + ", ".join(f"'{k}'" for k in WHERE_KEYS)
+                          + f" -- found {found}")
+        where = keys[0]
 
-        if keys[0] != "old":
-            buf, line, err = insert(buf, keys[0], e, idx)
+        for flag in ("last", "replace_all"):
+            if flag in e and not isinstance(e[flag], bool):
+                return None, f"edit {idx}: '{flag}' must be true or false"
+        if e.get("last") and e.get("replace_all"):
+            return None, f"edit {idx}: 'last' and 'replace_all' contradict"
+        if e.get("replace_all") and where != "old":
+            return None, f"edit {idx}: 'replace_all' means nothing with '{where}'"
+        if e.get("last") and where in ("append", "prepend"):
+            return None, f"edit {idx}: 'last' means nothing with '{where}'"
+
+        # -- append / prepend -------------------------------------------------
+        if where in ("append", "prepend"):
+            if "new" in e:
+                return None, (f"edit {idx}: '{where}' carries the text itself; "
+                              f"there is no 'new'")
+            at = len(buf) if where == "append" else 0
+            buf, n, err = splice_in(buf, at, e[where], idx, where)
             if err:
                 return None, err
-            report.append(line)
+            report.append(f"  edit {idx}: {where}ed {plural(n, 'line')} "
+                          f"at line {line_of(buf, at)}")
             continue
 
+        # -- insert before / after --------------------------------------------
+        if where == "insert":
+            if "new" in e:
+                return None, (f"edit {idx}: 'insert' carries the text itself; "
+                              f"there is no 'new'")
+            sides = [k for k in ("before", "after") if k in e]
+            if len(sides) != 1:
+                return None, (f"edit {idx}: 'insert' needs exactly one of "
+                              f"'before', 'after'")
+            side = sides[0]
+            start, note, err = locate(buf, side, e, idx)
+            if err:
+                return None, err
+            at = start if side == "before" else start + len(e[side])
+            # Reported in the numbering of the file as read, like every other
+            # edit, so the line can be checked against the `read` that led here.
+            anchor_line = line_of(buf, start)
+            buf, n, err = splice_in(buf, at, e["insert"], idx, "insert")
+            if err:
+                return None, err
+            report.append(f"  edit {idx}: inserted {plural(n, 'line')} "
+                          f"{side} line {anchor_line}{note}")
+            continue
+
+        # -- old / from both replace, and both need a new --------------------
         if "new" not in e:
-            return None, f"edit {idx}: 'old' needs a matching 'new'"
-        old, new = e["old"], e["new"]
-        if not isinstance(old, str) or not isinstance(new, str):
-            return None, f"edit {idx}: 'old' and 'new' must be strings"
-        if old == "":
-            return None, f"edit {idx}: 'old' is empty"
-        if old == new:
-            return None, f"edit {idx}: 'old' and 'new' are identical"
+            return None, f"edit {idx}: '{where}' needs a matching 'new'"
+        new = e["new"]
+        if not isinstance(new, str):
+            return None, f"edit {idx}: 'new' must be a string"
 
-        hits = find_all(buf, old)
-        if not hits:
-            return None, f"edit {idx}: not found — {diagnose(buf, old)}"
+        # -- old / new ---------------------------------------------------------
+        if where == "old":
+            old = e["old"]
+            if e.get("replace_all"):
+                if not isinstance(old, str):
+                    return None, f"edit {idx}: 'old' must be a string"
+                if old == "":
+                    return None, f"edit {idx}: 'old' is empty"
+                if old == new:
+                    return None, f"edit {idx}: 'old' and 'new' are identical"
+                hits = find_all(buf, old)
+                if not hits:
+                    return None, f"edit {idx}: 'old' not found — {diagnose(buf, old)}"
+                lines = [line_of(buf, h) for h in hits]
+                buf = buf.replace(old, new)
+                shown = ", ".join(str(x) for x in lines[:8])
+                more = "" if len(lines) <= 8 else f", +{len(lines) - 8} more"
+                report.append(f"  edit {idx}: {len(hits)} replacements "
+                              f"(lines {shown}{more})")
+                continue
+            if old == new:
+                return None, f"edit {idx}: 'old' and 'new' are identical"
+            start, note, err = locate(buf, "old", e, idx)
+            if err:
+                return None, err
+            report.append(f"  edit {idx}: line {line_of(buf, start)}{note}")
+            buf = buf[:start] + new + buf[start + len(old):]
+            continue
 
-        if e.get("replace_all"):
-            lines = [line_of(buf, h) for h in hits]
-            buf = buf.replace(old, new)
-            shown = ", ".join(str(x) for x in lines[:8])
-            more = "" if len(lines) <= 8 else f", +{len(lines) - 8} more"
-            report.append(f"  edit {idx}: {len(hits)} replacements "
-                          f"(lines {shown}{more})")
-        elif len(hits) > 1:
-            shown = ", ".join(str(line_of(buf, h)) for h in hits[:8])
-            more = "" if len(hits) <= 8 else f", +{len(hits) - 8} more"
-            return None, (f"edit {idx}: {len(hits)} matches (lines {shown}{more})"
-                          f" — add surrounding context, or set"
-                          f" \"replace_all\": true")
-        else:
-            report.append(f"  edit {idx}: line {line_of(buf, hits[0])}")
-            buf = buf[:hits[0]] + new + buf[hits[0] + len(old):]
+        # -- from / to|until ---------------------------------------------------
+        ends = [k for k in ("to", "until") if k in e]
+        if len(ends) != 1:
+            return None, f"edit {idx}: 'from' needs exactly one of 'to', 'until'"
+        endkey = ends[0]
+        stop = e[endkey]
+        if not isinstance(stop, str):
+            return None, f"edit {idx}: '{endkey}' must be a string"
+        if stop == "":
+            return None, f"edit {idx}: '{endkey}' is empty"
+        start, note, err = locate(buf, "from", e, idx)
+        if err:
+            return None, err
+        # The end is the first occurrence after `from`, searched from where
+        # `from` finishes so the two anchors cannot overlap. First rather than
+        # unique, because "up to the next test" is the whole idiom.
+        after = start + len(e["from"])
+        j = buf.find(stop, after)
+        if j == -1:
+            from_line = line_of(buf, start)
+            return None, (f"edit {idx}: '{endkey}' not found after 'from' "
+                          f"(line {from_line}) — "
+                          f"{diagnose(buf[after:], stop, base=line_of(buf, after) - 1)}")
+        end = j + len(stop) if endkey == "to" else j
+        if buf[start:end] == new:
+            return None, f"edit {idx}: the range already reads as 'new'"
+        first, final = line_of(buf, start), line_of(buf, max(start, end - 1))
+        span = f"line {first}" if first == final else f"lines {first}-{final}"
+        what = "deleted" if new == "" else "replaced"
+        report.append(f"  edit {idx}: {span} {what}{note}")
+        buf = buf[:start] + new + buf[end:]
 
     return buf, report
 
@@ -327,17 +475,40 @@ def write_atomic(path, text):
         raise
 
 
+def parse_windows(spec):
+    """Turn `12-40,90,200-` into [(12, 40), (90, 90), (200, None)]."""
+    out = []
+    for part in spec.split(","):
+        part = part.strip()
+        a, dash, b = part.partition("-")
+        try:
+            lo = int(a)
+            hi = None if (dash and b == "") else (int(b) if dash else lo)
+        except ValueError:
+            die(f"--lines: '{part}' is not a line number or A-B range")
+        if lo < 1 or (hi is not None and hi < lo):
+            die(f"--lines: '{part}' is not a valid range")
+        out.append((lo, hi))
+    return out
+
+
 def cmd_read(args):
     text = read_file(args.file)
     print(f"# scalpel {digest(text)} {args.file}")
     lines = text.split("\n")
-    start = max(1, args.offset)
-    if start > len(lines):
-        return 0
-    end = len(lines) if args.limit is None else min(len(lines), start + args.limit - 1)
-    width = len(str(end))
-    for i in range(start, end + 1):
-        print(f"{str(i).rjust(width)}\t{lines[i - 1]}")
+    if lines and lines[-1] == "":
+        lines.pop()          # a trailing newline is not a trailing empty line
+    windows = parse_windows(args.lines) if args.lines else [(1, None)]
+    windows = [(lo, len(lines) if hi is None else min(hi, len(lines)))
+               for lo, hi in windows]
+    width = len(str(max([hi for _, hi in windows] + [1])))
+    for lo, hi in windows:
+        if lo > len(lines):
+            print(f"scalpel: {args.file} has {len(lines)} lines; "
+                  f"{lo}- is past the end", file=sys.stderr)
+            continue
+        for i in range(lo, hi + 1):
+            print(f"{str(i).rjust(width)}\t{lines[i - 1]}")
     return 0
 
 
@@ -413,8 +584,9 @@ def main():
 
     r = sub.add_parser("read", help="print a content hash, then the file")
     r.add_argument("file")
-    r.add_argument("--offset", type=int, default=1, help="first line (1-based)")
-    r.add_argument("--limit", type=int, default=None, help="how many lines")
+    r.add_argument("--lines", metavar="A-B[,C-D...]",
+                   help="print only these windows (1-based, inclusive; "
+                        "'42' is one line, '200-' runs to the end)")
     r.set_defaults(fn=cmd_read)
 
     h = sub.add_parser("digest", help="print the content hash alone")
