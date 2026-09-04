@@ -446,12 +446,21 @@ EOF
   || no "two ways of saying where is refused" "$out"
 
 out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
-[{"nonsense": "y"}]
+[{"new": "y"}]
 EOF
 )
 [[ $? -ne 0 && "$out" == *"exactly one of"* ]] \
   && ok "no way of saying where is refused" \
   || no "no way of saying where is refused" "$out"
+
+# A typo'd key would otherwise be ignored, and `untill` or `lsat` ignored is a
+# different edit from the one asked for.
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"old": "x", "new": "y", "lsat": true}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"unknown key 'lsat'"* ]] \
+  && ok "unknown key is refused" || no "unknown key is refused" "$out"
 
 out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
 [{"append": ""}]
@@ -474,6 +483,399 @@ EOF
 [[ $? -ne 0 && "$out" == *"means nothing"* ]] \
   && ok "replace_all on an append is refused" \
   || no "replace_all on an append is refused" "$out"
+
+# --- read windows -----------------------------------------------------------
+print -r -- ""
+print -r -- "reading windows"
+
+f=$(fixture win.txt 'l1
+l2
+l3
+l4
+l5
+l6
+l7
+l8
+l9
+l10
+')
+out=$("$SCALPEL" read "$f" --lines 2-3,9-10 | tail -n +2)
+check "several windows in one call" $' 2\tl2\n 3\tl3\n 9\tl9\n10\tl10' "$out"
+
+out=$("$SCALPEL" read "$f" --lines 4 | tail -n +2)
+check "a bare number is one line" $'4\tl4' "$out"
+
+out=$("$SCALPEL" read "$f" --lines 9- | tail -n +2)
+check "an open range runs to the end" $' 9\tl9\n10\tl10' "$out"
+
+# A trailing newline is not an eleventh empty line.
+check "read does not invent a trailing empty line" "10" "$("$SCALPEL" read "$f" | tail -n +2 | wc -l | tr -d ' ')"
+
+out=$("$SCALPEL" read "$f" --lines 50-60 2>&1 >/dev/null)
+[[ "$out" == *"past the end"* ]] \
+  && ok "a window past the end says so" || no "a window past the end says so" "$out"
+
+out=$("$SCALPEL" read "$f" --lines 5-2 2>&1 >/dev/null)
+[[ $? -ne 0 && "$out" == *"not a valid range"* ]] \
+  && ok "a backwards range is refused" || no "a backwards range is refused" "$out"
+
+# The hash on a windowed read must be the hash of the whole file, or the
+# pairing with --expect-hash breaks exactly when the file is big enough to
+# want windows.
+rh=$("$SCALPEL" read "$f" --lines 2-3 | head -1 | awk '{print $3}')
+check "windowed read hashes the whole file" "$("$SCALPEL" digest "$f")" "$rh"
+
+# --- range replace -----------------------------------------------------------
+print -r -- ""
+print -r -- "replacing a range"
+
+RUST='mod tests {
+    #[test]
+    fn keep() {
+        assert!(true);
+    }
+
+    #[test]
+    fn drop_me() {
+        let x = 1;
+        assert_eq!(x, 1);
+    }
+
+    #[test]
+    fn also_keep() {
+        assert!(true);
+    }
+}
+'
+
+f=$(fixture until.rs "$RUST")
+out=$("$SCALPEL" edit "$f" <<'EOF'
+[{"from": "    #[test]\n    fn drop_me", "until": "    #[test]\n    fn also_keep", "new": ""}]
+EOF
+)
+check "until deletes up to its anchor" 'mod tests {
+    #[test]
+    fn keep() {
+        assert!(true);
+    }
+
+    #[test]
+    fn also_keep() {
+        assert!(true);
+    }
+}' "$(cat "$f")"
+[[ "$out" == *"lines 7-12 deleted"* ]] \
+  && ok "  ...and reports the span" || no "  ...and reports the span" "$out"
+
+f=$(fixture to.rs "$RUST")
+out=$("$SCALPEL" edit "$f" <<'EOF'
+[{"from": "    fn drop_me() {", "to": "\n    }\n", "new": "    fn renamed() {\n        todo!()\n    }\n"}]
+EOF
+)
+check "to replaces through its anchor" 'mod tests {
+    #[test]
+    fn keep() {
+        assert!(true);
+    }
+
+    #[test]
+    fn renamed() {
+        todo!()
+    }
+
+    #[test]
+    fn also_keep() {
+        assert!(true);
+    }
+}' "$(cat "$f")"
+[[ "$out" == *"lines 8-11 replaced"* ]] \
+  && ok "  ...and reports the span" || no "  ...and reports the span" "$out"
+
+# `from` obeys the uniqueness rule; only the end anchor takes the first hit.
+f=$(fixture amb-from.rs "$RUST")
+before=$(cat "$f")
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"from": "    #[test]\n", "until": "}\n", "new": ""}]
+EOF
+)
+[[ $? -eq 2 && "$out" == *"'from' has 3 matches"* ]] \
+  && ok "ambiguous from is refused" || no "ambiguous from is refused" "$out"
+check "  ...and nothing was written" "$before" "$(cat "$f")"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"from": "    fn drop_me() {", "until": "    fn never_here", "new": ""}]
+EOF
+)
+[[ $? -eq 2 && "$out" == *"'until' not found after 'from' (line 8)"* ]] \
+  && ok "missing end anchor names the from line" \
+  || no "missing end anchor names the from line" "$out"
+
+# The end is searched only after `from`, so an anchor that also appears
+# earlier in the file cannot produce a backwards range.
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"from": "    fn also_keep() {", "until": "    fn keep() {", "new": ""}]
+EOF
+)
+[[ $? -eq 2 && "$out" == *"not found after 'from'"* ]] \
+  && ok "end anchor before from does not count" \
+  || no "end anchor before from does not count" "$out"
+check "  ...and nothing was written" "$before" "$(cat "$f")"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"from": "    fn drop_me() {", "new": ""}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"exactly one of 'to', 'until'"* ]] \
+  && ok "from without an end is refused" || no "from without an end is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"from": "    fn drop_me() {", "to": "\n    }\n", "new": "    fn drop_me() {\n        let x = 1;\n        assert_eq!(x, 1);\n    }\n"}]
+EOF
+)
+[[ $? -eq 2 && "$out" == *"already reads as 'new'"* ]] \
+  && ok "no-op range is refused" || no "no-op range is refused" "$out"
+
+f=$(fixture atomic-range.rs "$RUST")
+"$SCALPEL" edit "$f" > /dev/null 2>&1 <<'EOF'
+[{"from": "    fn drop_me() {", "to": "\n    }\n", "new": ""},
+ {"old": "absent", "new": "x"}]
+EOF
+check "a later failure discards the range edit" "$RUST" "$(cat "$f")"$'\n'
+
+# --- anchored insert ---------------------------------------------------------
+print -r -- ""
+print -r -- "inserting at an anchor"
+
+f=$(fixture ins.txt 'alpha
+beta
+gamma
+')
+out=$("$SCALPEL" edit "$f" <<'EOF'
+[{"insert": "one\n", "before": "beta\n"},
+ {"insert": "two\n", "after": "beta\n"}]
+EOF
+)
+check "insert before and after an anchor" 'alpha
+one
+beta
+two
+gamma' "$(cat "$f")"
+[[ "$out" == *"inserted 1 line before line 2"* \
+   && "$out" == *"inserted 1 line after line 3"* ]] \
+  && ok "  ...and reports both positions" || no "  ...and reports both positions" "$out"
+
+# The anchor is not repeated in the text, so it must not be consumed either.
+f=$(fixture ins-keep.txt 'x
+')
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"insert": "y\n", "after": "x\n"}]
+EOF
+check "the anchor survives the insert" 'x
+y' "$(cat "$f")"
+
+f=$(fixture ins-amb.txt 'a
+b
+a
+')
+before=$(cat "$f")
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"insert": "c\n", "before": "a\n"}]
+EOF
+)
+[[ $? -eq 2 && "$out" == *"'before' has 2 matches"* ]] \
+  && ok "ambiguous anchor is refused" || no "ambiguous anchor is refused" "$out"
+check "  ...and nothing was written" "$before" "$(cat "$f")"
+
+# Both seams. Text that does not end in a newline would run into the anchor
+# line; an anchor that ends mid-line would be continued by the text.
+f=$(fixture ins-seam.txt 'alpha
+beta
+')
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"insert": "x", "before": "beta"}]
+EOF
+)
+[[ $? -eq 2 && "$out" == *"run into line 2"* ]] \
+  && ok "insert running into the anchor line is refused" \
+  || no "insert running into the anchor line is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"insert": "x\n", "after": "alp"}]
+EOF
+)
+[[ $? -eq 2 && "$out" == *"continue"* && "$out" == *"line 1"* ]] \
+  && ok "insert continuing the anchor line is refused" \
+  || no "insert continuing the anchor line is refused" "$out"
+check "  ...and nothing was written" 'alpha
+beta' "$(cat "$f")"
+
+# A leading newline is how the text asks to start a fresh line after an anchor
+# that ends mid-line: `after: "}"` with `insert: "\nfn f() {}"`.
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"insert": "\nmid", "after": "alpha"}]
+EOF
+check "a leading newline satisfies the left seam" 'alpha
+mid
+beta' "$(cat "$f")"
+
+f=$(fixture ins-crlf.txt $'a\r\nb\r\n')
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"insert": "c\n", "before": "b\r\n"}]
+EOF
+)
+[[ $? -eq 2 && "$out" == *"CRLF"* ]] \
+  && ok "LF text inserted into a CRLF file is refused" \
+  || no "LF text inserted into a CRLF file is refused" "$out"
+
+f=$(fixture ins-bad.txt 'x
+')
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"insert": "y\n"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"exactly one of 'before', 'after'"* ]] \
+  && ok "insert without an anchor is refused" \
+  || no "insert without an anchor is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"insert": "y\n", "before": "x", "after": "x"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"exactly one of 'before', 'after'"* ]] \
+  && ok "insert with two anchors is refused" \
+  || no "insert with two anchors is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"insert": "y\n", "before": "x", "new": "z"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"no 'new'"* ]] \
+  && ok "insert with a 'new' is refused" || no "insert with a 'new' is refused" "$out"
+
+f=$(fixture atomic-ins2.txt 'keep
+')
+"$SCALPEL" edit "$f" > /dev/null 2>&1 <<'EOF'
+[{"insert": "added\n", "before": "keep\n"}, {"old": "absent", "new": "x"}]
+EOF
+check "a later failure discards the insert" 'keep' "$(cat "$f")"
+
+# --- last --------------------------------------------------------------------
+print -r -- ""
+print -r -- "last: true"
+
+# The motivating case: a tests module whose only distinguishing feature is
+# that its closing brace comes last.
+f=$(fixture last.rs 'fn a() {
+}
+
+mod tests {
+    fn t() {
+    }
+}
+')
+out=$("$SCALPEL" edit "$f" <<'EOF'
+[{"insert": "    fn added() {\n    }\n", "before": "}\n", "last": true}]
+EOF
+)
+check "last picks the final anchor for an insert" 'fn a() {
+}
+
+mod tests {
+    fn t() {
+    }
+    fn added() {
+    }
+}' "$(cat "$f")"
+[[ "$out" == *"inserted 2 lines before line 7 (last of 3)"* ]] \
+  && ok "  ...and says it chose the last of several" \
+  || no "  ...and says it chose the last of several" "$out"
+
+f=$(fixture last-old.txt 'x
+x
+x
+')
+out=$("$SCALPEL" edit "$f" <<'EOF'
+[{"old": "x", "new": "y", "last": true}]
+EOF
+)
+check "last on old replaces only the final match" 'x
+x
+y' "$(cat "$f")"
+[[ "$out" == *"line 3 (last of 3)"* ]] \
+  && ok "  ...and reports the line" || no "  ...and reports the line" "$out"
+
+f=$(fixture last-from.txt 'BEGIN
+one
+END
+BEGIN
+two
+END
+')
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"from": "BEGIN\n", "to": "END\n", "new": "", "last": true}]
+EOF
+check "last on from ranges from the final start" 'BEGIN
+one
+END' "$(cat "$f")"
+
+f=$(fixture last-after.txt 'a
+b
+a
+')
+"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+[{"insert": "c\n", "after": "a\n", "last": true}]
+EOF
+check "last on after inserts past the final anchor" 'a
+b
+a
+c' "$(cat "$f")"
+
+# A single match with last: true is still that match; the flag relaxes
+# uniqueness, it does not demand plurality.
+f=$(fixture last-one.txt 'only
+')
+out=$("$SCALPEL" edit "$f" <<'EOF'
+[{"old": "only", "new": "one", "last": true}]
+EOF
+)
+check "last with a single match still applies" 'one' "$(cat "$f")"
+[[ "$out" != *"last of"* ]] \
+  && ok "  ...without claiming to have chosen" \
+  || no "  ...without claiming to have chosen" "$out"
+
+f=$(fixture last-bad.txt 'x
+')
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"old": "x", "new": "y", "last": true, "replace_all": true}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"contradict"* ]] \
+  && ok "last with replace_all is refused" || no "last with replace_all is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"append": "y\n", "last": true}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"means nothing"* ]] \
+  && ok "last on an append is refused" || no "last on an append is refused" "$out"
+
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"old": "x", "new": "y", "last": "yes"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"true or false"* ]] \
+  && ok "non-boolean last is refused" || no "non-boolean last is refused" "$out"
+
+# The ambiguity message now offers last as a way out.
+f=$(fixture hint.txt 'x
+x
+')
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"old": "x", "new": "y"}]
+EOF
+)
+[[ "$out" == *'"last": true'* ]] \
+  && ok "ambiguity suggests last" || no "ambiguity suggests last" "$out"
 
 print -r -- ""
 print -r -- "$pass passed, $fail failed"
