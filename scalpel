@@ -20,6 +20,7 @@ import difflib
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -111,6 +112,33 @@ WHERE_KEYS = ("old", "from", "insert", "append", "prepend")
 def die(msg, code=1):
     print(f"scalpel: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def version():
+    """The short hash of the checkout this script lives in, via the symlink.
+
+    A copy that has drifted from the repo says so with no hash at all, which
+    is the honest answer; a checkout with uncommitted changes says '-modified'.
+    """
+    here = os.path.dirname(os.path.realpath(__file__))
+    try:
+        out = subprocess.run(
+            ["git", "-C", here, "describe", "--always", "--dirty=-modified"],
+            capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown (not a git checkout)"
+    return out.stdout.strip()
+
+
+class Version(argparse.Action):
+    """Like action='version', but runs git only when asked."""
+
+    def __init__(self, option_strings, dest, **kw):
+        super().__init__(option_strings, dest, nargs=0, help=kw.get("help"))
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(f"scalpel {version()}")
+        parser.exit()
 
 
 def read_file(path):
@@ -580,6 +608,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Batch exact-match edits to one file, applied atomically.",
         epilog=WORKFLOW)
+    p.add_argument("--version", action=Version,
+                   help="print the git short hash of this checkout")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("read", help="print a content hash, then the file")

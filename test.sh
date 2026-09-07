@@ -877,6 +877,15 @@ EOF
 [[ "$out" == *'"last": true'* ]] \
   && ok "ambiguity suggests last" || no "ambiguity suggests last" "$out"
 
+# --- version ----------------------------------------------------------------
+print -r -- ""
+print -r -- "version"
+
+# The hash comes from the checkout the script lives in, so a symlinked install
+# reports the repo it points at, and uncommitted changes say so.
+want="scalpel $(git -C "${SCALPEL:h}" describe --always --dirty=-modified)"
+check "--version prints the git short hash" "$want" "$("$SCALPEL" --version)"
+
 print -r -- ""
 print -r -- "$pass passed, $fail failed"
 [[ $fail -eq 0 ]]

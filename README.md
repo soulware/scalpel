@@ -259,6 +259,9 @@ common. The fuzzy fallback catches the rest.
 Symlinks `scalpel` into `~/.local/bin`, so edits in this repo take effect
 immediately. It checks that the directory is on your `PATH` and says so if not.
 
+`scalpel --version` prints the short hash of the checkout the link points at,
+with `-modified` appended if that checkout has uncommitted changes.
+
 For Claude Code to reach for it, it has to know it exists. `install.sh` prints a
 block to paste into your `CLAUDE.md`; nothing is written to your config
 automatically.
