@@ -3,6 +3,18 @@
 Batch exact-match edits to one file, applied atomically, with a version check
 and diagnostics that say where a failed match nearly landed.
 
+## Quickstart
+
+```
+git clone https://github.com/soulware/scalpel ~/src/scalpel
+~/src/scalpel/install.sh
+scalpel --version
+```
+
+The clone is the install: `install.sh` symlinks into it, so put it somewhere
+that stays. Then paste the block it prints into `~/.claude/CLAUDE.md`. Details
+under [Install](#install).
+
 ## Why
 
 Claude Code's builtin `Edit` tool takes one `old_string`, requires it to be
@@ -262,19 +274,28 @@ common. The fuzzy fallback catches the rest.
 
 ## Install
 
+Needs python3, 3.7 or later, and git for `--version`. The tests need zsh.
+
 ```
-./install.sh
+git clone https://github.com/soulware/scalpel ~/src/scalpel
+~/src/scalpel/install.sh
 ```
 
-Symlinks `scalpel` into `~/.local/bin`, so edits in this repo take effect
-immediately. It checks that the directory is on your `PATH` and says so if not.
+The clone is the install. `install.sh` symlinks `scalpel` into `~/.local/bin`
+rather than copying it, so edits in the checkout take effect immediately -- and
+so the checkout has to stay where it is. Clone it somewhere permanent, not a
+scratch or temporary directory; a link into a directory that is later cleaned
+up fails on every call. The script checks that `~/.local/bin` is on your `PATH`
+and says so if not.
 
 `scalpel --version` prints the short hash of the checkout the link points at,
 with `-modified` appended if that checkout has uncommitted changes.
 
 For Claude Code to reach for it, it has to know it exists. `install.sh` prints a
-block to paste into your `CLAUDE.md`; nothing is written to your config
-automatically.
+block for your global `~/.claude/CLAUDE.md` and writes nothing there itself. It
+is printed so that a person can read it before it goes in; a Claude session
+installing scalpel for its user should show the block, then add it to that file
+with their agreement.
 
 ## What this does not do
 
