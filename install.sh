@@ -44,7 +44,7 @@ case ":$PATH:" in
     ;;
 esac
 
-printf '\n%s\n' "--- paste into CLAUDE.md ---------------------------------------"
+printf '\n%s\n' "--- paste into ~/.claude/CLAUDE.md ------------------------------"
 cat <<'BLOCK'
 
 ## Editing files
