@@ -41,7 +41,7 @@ f=$(fixture a.txt 'alpha
 beta
 gamma
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"old": "beta", "new": "BETA"}]
 EOF
 check "single edit applies" 'alpha
@@ -53,7 +53,7 @@ two
 three
 four
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"old": "one", "new": "1"},
  {"old": "three", "new": "3"},
  {"old": "four", "new": "4"}]
@@ -67,7 +67,7 @@ two
 # from editing one hunk at a time and callers will be surprised.
 f=$(fixture seq.txt 'x
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"old": "x", "new": "y"},
  {"old": "y", "new": "z"}]
 EOF
@@ -77,7 +77,7 @@ f=$(fixture all.txt 'dup
 keep
 dup
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"old": "dup", "new": "D", "replace_all": true}]
 EOF
 check "replace_all replaces every match" 'D
@@ -94,7 +94,7 @@ f=$(fixture atomic.txt 'one
 two
 ')
 before=$(cat "$f")
-"$SCALPEL" edit "$f" > /dev/null 2>&1 <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null 2>&1 <<'EOF'
 [{"old": "one", "new": "1"},
  {"old": "nonexistent", "new": "x"}]
 EOF
@@ -173,6 +173,36 @@ rh=$("$SCALPEL" read "$f" | head -1 | awk '{print $3}')
 hh=$("$SCALPEL" digest "$f")
 check "read and digest agree" "$hh" "$rh"
 
+# The hash is demanded, not offered. An edit with neither a hash nor the
+# opt-out is refused before it reads stdin, and writes nothing.
+f=$(fixture nohash.txt 'original
+')
+out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+[{"old": "original", "new": "edited"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"--unchecked"* && "$out" == *"scalpel read"* ]] \
+  && ok "no hash and no --unchecked is refused" \
+  || no "no hash and no --unchecked is refused" "$out"
+check "refusal for a missing hash writes nothing" 'original' "$(cat "$f")"
+
+out=$("$SCALPEL" edit "$f" --expect-hash "$("$SCALPEL" digest "$f")" --unchecked 2>&1 <<'EOF'
+[{"old": "original", "new": "edited"}]
+EOF
+)
+[[ $? -ne 0 && "$out" == *"contradict"* ]] \
+  && ok "a hash and --unchecked together are refused" \
+  || no "a hash and --unchecked together are refused" "$out"
+check "contradictory flags write nothing" 'original' "$(cat "$f")"
+
+# A dry run writes nothing, so there is nothing for a hash to guard.
+out=$("$SCALPEL" edit "$f" --dry-run 2>/dev/null <<'EOF'
+[{"old": "original", "new": "edited"}]
+EOF
+)
+[[ "$out" == *"+edited"* ]] \
+  && ok "dry run needs no hash" || no "dry run needs no hash" "$out"
+
 # --- diagnostics -------------------------------------------------------------
 print -r -- ""
 print -r -- "near-miss diagnostics"
@@ -183,7 +213,7 @@ print -r -- "near-miss diagnostics"
 f=$(fixture ws.txt 'def f():
         return 1
 ')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "def f():\n    return 1", "new": "def f():\n    return 2"}]
 EOF
 )
@@ -193,7 +223,7 @@ EOF
 
 f=$(fixture ws2.txt '    indented line
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"old": "indented line", "new": "x"}]
 EOF
 check "leading space is still a substring match" '    x' "$(cat "$f")"
@@ -201,7 +231,7 @@ check "leading space is still a substring match" '    x' "$(cat "$f")"
 f=$(fixture amb.txt 'return None
 return None
 ')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "return None", "new": "return 0"}]
 EOF
 )
@@ -210,7 +240,7 @@ EOF
   || no "ambiguity lists every line" "$out"
 
 f=$(fixture crlf.txt $'alpha\r\nbeta\r\n')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "alpha\nbeta", "new": "x"}]
 EOF
 )
@@ -221,7 +251,7 @@ EOF
 f=$(fixture near.txt 'def process(self, value):
     return value * 2
 ')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "def process(self, val):", "new": "def process(self, v):"}]
 EOF
 )
@@ -231,7 +261,7 @@ EOF
 
 f=$(fixture none.txt 'completely unrelated
 ')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "zzzzz qqqqq", "new": "x"}]
 EOF
 )
@@ -244,7 +274,7 @@ print -r -- ""
 print -r -- "preserving the file"
 
 f=$(fixture keepcrlf.txt $'alpha\r\nbeta\r\n')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"old": "alpha", "new": "ALPHA"}]
 EOF
 if [[ -n "$(tr -d '\0' < "$f" | grep -c $'\r')" ]] && od -c < "$f" | grep -q '\\r'; then
@@ -254,7 +284,7 @@ else
 fi
 
 f=$(fixture nonewline.txt 'no trailing newline')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"old": "no trailing", "new": "still no trailing"}]
 EOF
 [[ "$(od -c < "$f" | tail -2 | head -1)" != *'\n'* ]] \
@@ -264,7 +294,7 @@ EOF
 f=$(fixture perms.sh 'echo hi
 ')
 chmod 755 "$f"
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"old": "hi", "new": "bye"}]
 EOF
 check "file mode is preserved" "755" "$(stat -f '%Lp' "$f")"
@@ -291,7 +321,7 @@ print -r -- "appending and prepending"
 f=$(fixture app.txt 'alpha
 beta
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"append": "gamma\n"}]
 EOF
 check "append lands at the end" 'alpha
@@ -301,7 +331,7 @@ gamma' "$(cat "$f")"
 f=$(fixture pre.txt 'alpha
 beta
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"prepend": "# header\n"}]
 EOF
 check "prepend lands at the start" '# header
@@ -313,7 +343,7 @@ beta' "$(cat "$f")"
 f=$(fixture mix.txt 'alpha
 beta
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"prepend": "# top\n"}, {"old": "beta", "new": "BETA"}, {"append": "delta\n"}]
 EOF
 check "inserts and replacements share one batch" '# top
@@ -323,7 +353,7 @@ delta' "$(cat "$f")"
 
 f=$(fixture stack.txt 'one
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"append": "two\n"}, {"append": "three\n"}]
 EOF
 check "two appends stack in order" 'one
@@ -331,7 +361,7 @@ two
 three' "$(cat "$f")"
 
 f=$(fixture empty.txt '')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"append": "first\n"}]
 EOF
 check "append to an empty file" 'first' "$(cat "$f")"
@@ -340,7 +370,7 @@ check "append to an empty file" 'first' "$(cat "$f")"
 # for it, exactly as `old`/`new` text is taken literally.
 f=$(fixture exact.txt 'a
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"append": "b"}]
 EOF
 check "no newline is invented" $'a\nb' "$(cat "$f")"
@@ -348,7 +378,7 @@ check "no newline is invented" $'a\nb' "$(cat "$f")"
 # A failed insert must leave the file alone like any other failed edit.
 f=$(fixture atomic-ins.txt 'keep
 ')
-"$SCALPEL" edit "$f" > /dev/null 2>&1 <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null 2>&1 <<'EOF'
 [{"append": "added\n"}, {"old": "absent", "new": "x"}]
 EOF
 check "a later failure discards the append" 'keep' "$(cat "$f")"
@@ -362,7 +392,7 @@ print -r -- "refusing a seam that would corrupt"
 # that would silently weld two lines together is refused instead.
 f=$(fixture nonl.txt 'alpha
 beta')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"append": "gamma\n"}]
 EOF
 )
@@ -372,7 +402,7 @@ EOF
 check "  ...and nothing was written" 'alpha
 beta' "$(cat "$f")"
 
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"append": "\ngamma\n"}]
 EOF
 check "  ...and the suggested fix works" 'alpha
@@ -381,7 +411,7 @@ gamma' "$(cat "$f")"
 
 f=$(fixture prenl.txt 'alpha
 ')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"prepend": "# header"}]
 EOF
 )
@@ -390,7 +420,7 @@ EOF
   || no "prepend that would run into line 1 is refused" "$out"
 
 f=$(fixture crlf-ins.txt $'a\r\nb\r\n')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"append": "c\n"}]
 EOF
 )
@@ -398,7 +428,7 @@ EOF
   && ok "LF text appended to a CRLF file is refused" \
   || no "LF text appended to a CRLF file is refused" "$out"
 
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"append": "c\r\n"}]
 EOF
 # Compared as bytes: command substitution eats the trailing newline but leaves
@@ -412,32 +442,32 @@ print -r -- "rejecting bad input"
 
 f=$(fixture bad.txt 'x
 ')
-out=$("$SCALPEL" edit "$f" 2>&1 <<<'not json')
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<<'not json')
 [[ $? -ne 0 && "$out" == *"not valid JSON"* ]] \
   && ok "invalid JSON is refused" || no "invalid JSON is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "x", "new": "x"}]
 EOF
 )
 [[ $? -ne 0 && "$out" == *"identical"* ]] \
   && ok "no-op edit is refused" || no "no-op edit is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "", "new": "y"}]
 EOF
 )
 [[ $? -ne 0 && "$out" == *"empty"* ]] \
   && ok "empty old is refused" || no "empty old is refused" "$out"
 
-out=$("$SCALPEL" edit "$WORK/missing.txt" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$WORK/missing.txt" 2>&1 <<'EOF'
 [{"old": "a", "new": "b"}]
 EOF
 )
 [[ $? -ne 0 && "$out" == *"no such file"* ]] \
   && ok "missing file is refused" || no "missing file is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "x", "new": "y", "append": "z\n"}]
 EOF
 )
@@ -445,7 +475,7 @@ EOF
   && ok "two ways of saying where is refused" \
   || no "two ways of saying where is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"new": "y"}]
 EOF
 )
@@ -455,28 +485,28 @@ EOF
 
 # A typo'd key would otherwise be ignored, and `untill` or `lsat` ignored is a
 # different edit from the one asked for.
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "x", "new": "y", "lsat": true}]
 EOF
 )
 [[ $? -ne 0 && "$out" == *"unknown key 'lsat'"* ]] \
   && ok "unknown key is refused" || no "unknown key is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"append": ""}]
 EOF
 )
 [[ $? -ne 0 && "$out" == *"empty"* ]] \
   && ok "empty append is refused" || no "empty append is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"append": "y\n", "new": "z"}]
 EOF
 )
 [[ $? -ne 0 && "$out" == *"no 'new'"* ]] \
   && ok "append with a 'new' is refused" || no "append with a 'new' is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"append": "y\n", "replace_all": true}]
 EOF
 )
@@ -549,7 +579,7 @@ RUST='mod tests {
 '
 
 f=$(fixture until.rs "$RUST")
-out=$("$SCALPEL" edit "$f" <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" <<'EOF'
 [{"from": "    #[test]\n    fn drop_me", "until": "    #[test]\n    fn also_keep", "new": ""}]
 EOF
 )
@@ -568,7 +598,7 @@ check "until deletes up to its anchor" 'mod tests {
   && ok "  ...and reports the span" || no "  ...and reports the span" "$out"
 
 f=$(fixture to.rs "$RUST")
-out=$("$SCALPEL" edit "$f" <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" <<'EOF'
 [{"from": "    fn drop_me() {", "to": "\n    }\n", "new": "    fn renamed() {\n        todo!()\n    }\n"}]
 EOF
 )
@@ -594,7 +624,7 @@ check "to replaces through its anchor" 'mod tests {
 # `from` obeys the uniqueness rule; only the end anchor takes the first hit.
 f=$(fixture amb-from.rs "$RUST")
 before=$(cat "$f")
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"from": "    #[test]\n", "until": "}\n", "new": ""}]
 EOF
 )
@@ -602,7 +632,7 @@ EOF
   && ok "ambiguous from is refused" || no "ambiguous from is refused" "$out"
 check "  ...and nothing was written" "$before" "$(cat "$f")"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"from": "    fn drop_me() {", "until": "    fn never_here", "new": ""}]
 EOF
 )
@@ -612,7 +642,7 @@ EOF
 
 # The end is searched only after `from`, so an anchor that also appears
 # earlier in the file cannot produce a backwards range.
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"from": "    fn also_keep() {", "until": "    fn keep() {", "new": ""}]
 EOF
 )
@@ -621,14 +651,14 @@ EOF
   || no "end anchor before from does not count" "$out"
 check "  ...and nothing was written" "$before" "$(cat "$f")"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"from": "    fn drop_me() {", "new": ""}]
 EOF
 )
 [[ $? -ne 0 && "$out" == *"exactly one of 'to', 'until'"* ]] \
   && ok "from without an end is refused" || no "from without an end is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"from": "    fn drop_me() {", "to": "\n    }\n", "new": "    fn drop_me() {\n        let x = 1;\n        assert_eq!(x, 1);\n    }\n"}]
 EOF
 )
@@ -636,7 +666,7 @@ EOF
   && ok "no-op range is refused" || no "no-op range is refused" "$out"
 
 f=$(fixture atomic-range.rs "$RUST")
-"$SCALPEL" edit "$f" > /dev/null 2>&1 <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null 2>&1 <<'EOF'
 [{"from": "    fn drop_me() {", "to": "\n    }\n", "new": ""},
  {"old": "absent", "new": "x"}]
 EOF
@@ -650,7 +680,7 @@ f=$(fixture ins.txt 'alpha
 beta
 gamma
 ')
-out=$("$SCALPEL" edit "$f" <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" <<'EOF'
 [{"insert": "one\n", "before": "beta\n"},
  {"insert": "two\n", "after": "beta\n"}]
 EOF
@@ -667,7 +697,7 @@ gamma' "$(cat "$f")"
 # The anchor is not repeated in the text, so it must not be consumed either.
 f=$(fixture ins-keep.txt 'x
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"insert": "y\n", "after": "x\n"}]
 EOF
 check "the anchor survives the insert" 'x
@@ -678,7 +708,7 @@ b
 a
 ')
 before=$(cat "$f")
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"insert": "c\n", "before": "a\n"}]
 EOF
 )
@@ -691,7 +721,7 @@ check "  ...and nothing was written" "$before" "$(cat "$f")"
 f=$(fixture ins-seam.txt 'alpha
 beta
 ')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"insert": "x", "before": "beta"}]
 EOF
 )
@@ -699,7 +729,7 @@ EOF
   && ok "insert running into the anchor line is refused" \
   || no "insert running into the anchor line is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"insert": "x\n", "after": "alp"}]
 EOF
 )
@@ -711,7 +741,7 @@ beta' "$(cat "$f")"
 
 # A leading newline is how the text asks to start a fresh line after an anchor
 # that ends mid-line: `after: "}"` with `insert: "\nfn f() {}"`.
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"insert": "\nmid", "after": "alpha"}]
 EOF
 check "a leading newline satisfies the left seam" 'alpha
@@ -719,7 +749,7 @@ mid
 beta' "$(cat "$f")"
 
 f=$(fixture ins-crlf.txt $'a\r\nb\r\n')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"insert": "c\n", "before": "b\r\n"}]
 EOF
 )
@@ -729,7 +759,7 @@ EOF
 
 f=$(fixture ins-bad.txt 'x
 ')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"insert": "y\n"}]
 EOF
 )
@@ -737,7 +767,7 @@ EOF
   && ok "insert without an anchor is refused" \
   || no "insert without an anchor is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"insert": "y\n", "before": "x", "after": "x"}]
 EOF
 )
@@ -745,7 +775,7 @@ EOF
   && ok "insert with two anchors is refused" \
   || no "insert with two anchors is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"insert": "y\n", "before": "x", "new": "z"}]
 EOF
 )
@@ -754,7 +784,7 @@ EOF
 
 f=$(fixture atomic-ins2.txt 'keep
 ')
-"$SCALPEL" edit "$f" > /dev/null 2>&1 <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null 2>&1 <<'EOF'
 [{"insert": "added\n", "before": "keep\n"}, {"old": "absent", "new": "x"}]
 EOF
 check "a later failure discards the insert" 'keep' "$(cat "$f")"
@@ -773,7 +803,7 @@ mod tests {
     }
 }
 ')
-out=$("$SCALPEL" edit "$f" <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" <<'EOF'
 [{"insert": "    fn added() {\n    }\n", "before": "}\n", "last": true}]
 EOF
 )
@@ -794,7 +824,7 @@ f=$(fixture last-old.txt 'x
 x
 x
 ')
-out=$("$SCALPEL" edit "$f" <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" <<'EOF'
 [{"old": "x", "new": "y", "last": true}]
 EOF
 )
@@ -811,7 +841,7 @@ BEGIN
 two
 END
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"from": "BEGIN\n", "to": "END\n", "new": "", "last": true}]
 EOF
 check "last on from ranges from the final start" 'BEGIN
@@ -822,7 +852,7 @@ f=$(fixture last-after.txt 'a
 b
 a
 ')
-"$SCALPEL" edit "$f" > /dev/null <<'EOF'
+"$SCALPEL" edit --unchecked "$f" > /dev/null <<'EOF'
 [{"insert": "c\n", "after": "a\n", "last": true}]
 EOF
 check "last on after inserts past the final anchor" 'a
@@ -834,7 +864,7 @@ c' "$(cat "$f")"
 # uniqueness, it does not demand plurality.
 f=$(fixture last-one.txt 'only
 ')
-out=$("$SCALPEL" edit "$f" <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" <<'EOF'
 [{"old": "only", "new": "one", "last": true}]
 EOF
 )
@@ -845,21 +875,21 @@ check "last with a single match still applies" 'one' "$(cat "$f")"
 
 f=$(fixture last-bad.txt 'x
 ')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "x", "new": "y", "last": true, "replace_all": true}]
 EOF
 )
 [[ $? -ne 0 && "$out" == *"contradict"* ]] \
   && ok "last with replace_all is refused" || no "last with replace_all is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"append": "y\n", "last": true}]
 EOF
 )
 [[ $? -ne 0 && "$out" == *"means nothing"* ]] \
   && ok "last on an append is refused" || no "last on an append is refused" "$out"
 
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "x", "new": "y", "last": "yes"}]
 EOF
 )
@@ -870,7 +900,7 @@ EOF
 f=$(fixture hint.txt 'x
 x
 ')
-out=$("$SCALPEL" edit "$f" 2>&1 <<'EOF'
+out=$("$SCALPEL" edit --unchecked "$f" 2>&1 <<'EOF'
 [{"old": "x", "new": "y"}]
 EOF
 )
