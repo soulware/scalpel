@@ -40,7 +40,8 @@ scalpel is the middle: batch the calls, keep the properties.
 ```
 scalpel read FILE [--lines A-B,C-D,...]          hash, then numbered content
 scalpel digest FILE                              the hash alone
-scalpel edit FILE [--expect-hash H] [--dry-run]  edits as JSON on stdin
+scalpel edit FILE --expect-hash H [--dry-run]    edits as JSON on stdin
+scalpel edit FILE --unchecked                    the same, with no version check
 ```
 
 ```console
@@ -63,6 +64,15 @@ scalpel: 3 edits applied to src/parser.rs
 # scalpel 9b2e77c04a1f src/parser.rs
 ```
 
+The hash is demanded, not merely accepted. An `edit` with neither
+`--expect-hash` nor `--unchecked` is refused before it reads its input, because
+an optional check is one that gets skipped: across the same transcripts, two
+scalpel edits in three ran without one. `--unchecked` waives it as a flag, so a
+write that could not have noticed a changed file is visible as a choice rather
+than an omission. Every successful edit prints the new hash on its last line,
+so a run of edits to one file chains without another read. `--dry-run` needs
+no hash, since it writes nothing.
+
 Each edit is an object with `old` and `new`, and optionally `replace_all`.
 `old` must appear exactly once unless `replace_all` is set. A bare object is
 accepted in place of a one-element array. The four other ways of saying where
@@ -81,7 +91,7 @@ construction: the end of the file and the start. An edit may carry `append` or
 `prepend` in place of `old`/`new`, holding the text directly.
 
 ```console
-$ scalpel edit tests/parser.rs <<'EOF'
+$ scalpel edit tests/parser.rs --expect-hash 7d0c41e2b9a5 <<'EOF'
 [{"append": "\n#[test]\nfn parses_nested_groups() {\n    assert!(parse(\"((a))\").is_ok());\n}\n"}]
 EOF
 scalpel: 1 edit applied to tests/parser.rs
@@ -102,7 +112,7 @@ instead, because each of these welds two lines together and then looks like
 success:
 
 ```console
-$ scalpel edit notes.md <<'EOF'
+$ scalpel edit notes.md --expect-hash 3e8b1f6a2c47 <<'EOF'
 [{"append": "one more line\n"}]
 EOF
 scalpel: edit 1: line 40 has no trailing newline before this point, so the text
@@ -123,7 +133,7 @@ edit was meant to save, and any drift in the middle is a failed match. `from`
 names the start and `to` or `until` names the end.
 
 ```console
-$ scalpel edit tests/parser.rs <<'EOF'
+$ scalpel edit tests/parser.rs --expect-hash 7d0c41e2b9a5 <<'EOF'
 [{"from": "    #[test]\n    fn parses_legacy_form",
   "until": "    #[test]\n    fn parses_nested_groups",
   "new": ""}]
@@ -149,7 +159,7 @@ place and once to keep it. `insert` carries the text and `before` or `after`
 carries the anchor, which must appear exactly once.
 
 ```console
-$ scalpel edit src/lib.rs <<'EOF'
+$ scalpel edit src/lib.rs --expect-hash c51a9e0d7b23 <<'EOF'
 [{"insert": "mod parser;\n", "after": "mod lexer;\n"}]
 EOF
 scalpel: 1 edit applied to src/lib.rs
@@ -171,7 +181,7 @@ file, and "the last one" is as definite a position as the end of the file is.
 place of requiring a unique one.
 
 ```console
-$ scalpel edit tests/parser.rs <<'EOF'
+$ scalpel edit tests/parser.rs --expect-hash 7d0c41e2b9a5 <<'EOF'
 [{"insert": "\n    #[test]\n    fn added() {\n        assert!(parse(\"a\").is_ok());\n    }\n",
   "before": "}\n", "last": true}]
 EOF
@@ -217,19 +227,19 @@ The reason to prefer a tool over `sed -i` is what happens when the match fails.
 `sed` tells you nothing; a bare "string not found" costs a re-read to resolve.
 
 ```console
-$ scalpel edit config.py <<'EOF'
+$ scalpel edit config.py --expect-hash 5f2e8c1a9d04 <<'EOF'
 [{"old": "timeout = 30", "new": "timeout = 60"}]
 EOF
 scalpel: edit 1: 'old' not found — matches at line 12 but the whitespace differs
   nothing was written
 
-$ scalpel edit handler.py <<'EOF'
+$ scalpel edit handler.py --expect-hash a97d3b4e6f18 <<'EOF'
 [{"old": "return None", "new": "return []"}]
 EOF
 scalpel: edit 1: 'old' has 3 matches (lines 22, 47, 91) — add surrounding context, set "last": true, or set "replace_all": true
   nothing was written
 
-$ scalpel edit win.txt <<'EOF'
+$ scalpel edit win.txt --expect-hash 1b6c0d9f4e82 <<'EOF'
 [{"old": "alpha\nbeta", "new": "gamma"}]
 EOF
 scalpel: edit 1: 'old' not found — file uses CRLF line endings, your text uses LF
@@ -271,8 +281,9 @@ automatically.
 **It is outside the harness's file tracking.** Claude Code's builtin tools
 maintain their own read-before-write state and will refuse an `Edit` to a file
 modified since the last `Read`. scalpel is a shell command and gets none of
-that. `--expect-hash` reconstructs the guarantee, but only if you pass it, which
-is why `read` emits the hash rather than making you ask.
+that. `--expect-hash` reconstructs the guarantee, and `edit` demands it rather
+than offering it, which is why `read` emits the hash rather than making you
+ask. `--unchecked` is the opt-out, and it is a flag so that it shows in review.
 
 **Your diff review is worse.** A builtin `Edit` renders as a diff in the
 transcript. A scalpel call renders as a JSON blob. That is a real loss, and it

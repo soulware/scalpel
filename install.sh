@@ -55,6 +55,12 @@ more changes to the same file, and over `sed -i`, `perl -pi`, and one-off
 Python rewrites always; for one or two edits the builtin Edit renders a better
 diff in review.
 
+`scalpel read` prints the hash on its first line, and `edit` refuses to run
+without it: pass it back as `--expect-hash`, or take the one printed on the
+last line of the previous edit. `--unchecked` waives the check, for a file
+nothing else can have touched. `--dry-run` shows the diff and writes nothing,
+for checking a large batch first.
+
 `scalpel read FILE --lines A-B,C-D` prints several windows under one hash.
 Reach for it instead of `sed -n 'A,Bp'` on a file too long to read whole.
 

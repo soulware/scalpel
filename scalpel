@@ -34,7 +34,10 @@ the read/edit pairing:
   `read` prints a content hash. `edit --expect-hash` takes it back and refuses
   to write if the file no longer hashes to it. A file that moved between your
   read and your write is then refused rather than silently overwritten -- the
-  check `sed -i` cannot have.
+  check `sed -i` cannot have. `edit` demands the hash: an edit with neither
+  `--expect-hash` nor `--unchecked` is refused before it reads its input. A
+  successful edit prints the new hash on its last line, so a run of edits to
+  one file chains without another read.
 
     $ scalpel read src/parser.rs --lines 1-3,40-60
     # scalpel 4f3a9c2b1e8d src/parser.rs
@@ -546,6 +549,15 @@ def cmd_digest(args):
 
 
 def cmd_edit(args):
+    # A version is demanded, not merely accepted: the check is the property
+    # that separates this from `sed -i`, and an optional check is one that is
+    # skipped two times in three. Waiving it is a flag, so it shows in review.
+    if args.expect_hash and args.unchecked:
+        die("--expect-hash and --unchecked contradict each other; pass one")
+    if not (args.expect_hash or args.unchecked or args.dry_run):
+        die(f"edit needs the file's version: pass --expect-hash from "
+            f"`scalpel read {args.file}`, or --unchecked to apply without one")
+
     text = read_file(args.file)
 
     # The version check, before anything else looks at the content.
@@ -628,7 +640,10 @@ def main():
                        epilog=EDIT_FORMAT)
     e.add_argument("file")
     e.add_argument("--expect-hash", metavar="SHA",
-                   help="refuse if the file no longer hashes to this")
+                   help="refuse if the file no longer hashes to this; "
+                        "required unless --unchecked or --dry-run")
+    e.add_argument("--unchecked", action="store_true",
+                   help="apply without a version check")
     e.add_argument("--dry-run", action="store_true",
                    help="print a unified diff, write nothing")
     e.set_defaults(fn=cmd_edit)
