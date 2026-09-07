@@ -1,16 +1,20 @@
-#!/bin/zsh
+#!/bin/sh
 # Link scalpel onto your PATH.
 #
 # Nothing here writes to ~/.claude. Telling Claude Code that scalpel exists is a
 # change to your CLAUDE.md, and that is yours to make — the block to paste is
 # printed at the end.
+#
+# POSIX sh, so it runs anywhere python3 does: a Linux box or a container with
+# no zsh, an Alpine image with no bash. The test suite stays zsh; it runs where
+# scalpel is developed, not where it is installed.
 set -e
 
-SRC="${0:A:h}/scalpel"
+SRC="$(cd "$(dirname "$0")" && pwd -P)/scalpel"
 BIN="$HOME/.local/bin"
 
 if ! command -v python3 > /dev/null; then
-  print -r -- "scalpel needs python3." >&2
+  printf '%s\n' "scalpel needs python3." >&2
   exit 1
 fi
 
@@ -20,49 +24,54 @@ chmod +x "$SRC"
 # Linked, not copied, so edits in this repo take effect on the next call. A
 # stale copy that silently diverges from the repo is the failure worth avoiding.
 ln -sf "$SRC" "$BIN/scalpel"
-print -r -- "linked $BIN/scalpel -> $SRC"
+printf '%s\n' "linked $BIN/scalpel -> $SRC"
 
 # A link onto a directory that is not on PATH installs cleanly and then is never
 # found, which reads as "the tool is broken" rather than "the shell cannot see
-# it". Say which one it is.
-if [[ ":$PATH:" != *":$BIN:"* ]]; then
-  print -r -- ""
-  print -r -- "warning: $BIN is not on your PATH."
-  print -r -- "add this to your ~/.zshrc:"
-  print -r -- ""
-  print -r -- "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-fi
+# it". Say which one it is, and name the rc file for the shell in use.
+case ":$PATH:" in
+  *":$BIN:"*) ;;
+  *)
+    case "${SHELL##*/}" in
+      zsh)  rc='~/.zshrc' ;;
+      bash) rc='~/.bashrc' ;;
+      *)    rc='your shell rc file' ;;
+    esac
+    printf '\n%s\n%s\n\n%s\n' \
+      "warning: $BIN is not on your PATH." \
+      "add this to $rc:" \
+      '    export PATH="$HOME/.local/bin:$PATH"'
+    ;;
+esac
 
-print -r -- ""
-print -r -- "--- paste into CLAUDE.md ---------------------------------------"
+printf '\n%s\n' "--- paste into CLAUDE.md ---------------------------------------"
 cat <<'BLOCK'
 
 ## Editing files
 
-`scalpel` batches exact-match edits into one atomic call. Prefer it over the
-builtin Edit tool when making three or more changes to the same file, and over
-`sed -i` always.
+`scalpel` batches exact-match edits to one file into a single atomic call,
+guarded by a content hash. Prefer it over the builtin Edit tool for three or
+more changes to the same file, and over `sed -i`, `perl -pi`, and one-off
+Python rewrites always; for one or two edits the builtin Edit renders a better
+diff in review.
 
-    scalpel read FILE [--lines A-B,C-D]   # prints "# scalpel <hash> FILE", then content
-    scalpel edit FILE --expect-hash <hash> <<'EOF'
-    [{"old": "...", "new": "..."},
-     {"old": "...", "new": "...", "replace_all": true},
-     {"from": "start anchor", "until": "end anchor", "new": ""},
-     {"insert": "text\n", "after": "anchor\n"},
-     {"insert": "text\n", "before": "}\n", "last": true},
-     {"append": "text\n"}]
-    EOF
+`scalpel read FILE --lines A-B,C-D` prints several windows under one hash.
+Reach for it instead of `sed -n 'A,Bp'` on a file too long to read whole.
 
-Pass `--expect-hash` with the hash from `scalpel read`. The edit is refused
-(exit 3) if anything wrote the file in between. All edits apply or none do; a
-failed batch writes nothing and names the line where the match nearly landed.
-Use `--dry-run` to see a diff without writing.
+Five ways to say where, all in `scalpel edit --help`:
 
-`from`/`to`/`until` replaces a range without quoting its body; `insert` with
-`before`/`after` adds whole lines beside an anchor; `last: true` picks the
-final occurrence where the file has no unique context. `scalpel edit --help`
-carries the full format.
+- `old`/`new` quotes what changes. It must be unique.
+- `from` + `to`/`until` + `new` replaces a range by its two ends. Use it to cut
+  a function or a test, or to replace a long body whose head and tail you
+  know, instead of quoting the whole body as `old`.
+- `insert` + `before`/`after` adds whole lines beside an anchor without
+  repeating the anchor in the text.
+- `append` and `prepend` need no anchor. Reach for one instead of `cat >>` and
+  instead of rewriting a file to add to its end.
+- `last: true` on any anchor takes the final occurrence, for the closing brace
+  of a module that has no other context.
 
-For one or two edits, the builtin Edit tool renders a better diff in review.
+Do not guess the input format -- edits are a JSON array on stdin, and
+improvising the shape costs more than the one call to check.
 BLOCK
-print -r -- "---------------------------------------------------------------"
+printf '%s\n' "---------------------------------------------------------------"
