@@ -222,9 +222,13 @@ your read and your write — you fixed a typo in your editor, a formatter ran on
 save, a hook fired, another session was in the same directory — and without the
 check that change is silently discarded.
 
-The check is optional, because sometimes you genuinely are creating the content
-you are about to match. But omitting it forfeits the only guarantee here that
-you cannot reconstruct by being careful.
+`edit` demands the hash rather than offering it, and `--unchecked` is the opt-out
+for a file whose content you are creating yourself. The hash has to come from a
+`read` you looked at before writing the edits, in an earlier call: that is what
+proves the file is still the one you read. A `read` run in the same command as
+the edit proves only that the file exists, which is `--unchecked` without the
+flag. The check is the one guarantee here that you cannot reconstruct by being
+careful.
 
 The hash is the first 12 characters of a SHA-256, because what it guards against
 is a file changing by accident — an editor, a formatter on save, another session
@@ -297,25 +301,27 @@ is printed so that a person can read it before it goes in; a Claude session
 installing scalpel for its user should show the block, then add it to that file
 with their agreement.
 
-## What this does not do
+## Limits
 
-**It is outside the harness's file tracking.** Claude Code's builtin tools
-maintain their own read-before-write state and will refuse an `Edit` to a file
-modified since the last `Read`. scalpel is a shell command and gets none of
-that. `--expect-hash` reconstructs the guarantee, and `edit` demands it rather
-than offering it, which is why `read` emits the hash rather than making you
-ask. `--unchecked` is the opt-out, and it is a flag so that it shows in review.
+**The version check is its own.** Claude Code's builtin tools maintain their
+own read-before-write state and refuse an `Edit` to a file modified since the
+last `Read`. scalpel is a shell command, so `--expect-hash` carries that
+guarantee itself, and `edit` demands it rather than offering it, which is why
+`read` emits the hash rather than making you ask. `--unchecked` is the
+opt-out, and it is a flag so that it shows in review.
 
-**Your diff review is worse.** A builtin `Edit` renders as a diff in the
-transcript. A scalpel call renders as a JSON blob. That is a real loss, and it
-argues for using the builtin for short runs and scalpel only when the batch is
-long enough to pay for it. On the numbers above, that is about a quarter of
-runs.
+**Review reads JSON.** A builtin `Edit` renders as a diff in the transcript; a
+scalpel call renders as the JSON it was given. That is a real loss, and the
+CLAUDE.md block still says scalpel for every edit, because a threshold is a
+decision on every edit, and a session that gets it wrong falls back to `sed -i`
+rather than to `Edit`. `--dry-run` prints a unified diff when the review
+matters.
 
-**It is one file per call.** Cross-file renames are still a script.
+**One file per call.** A cross-file rename is a script of calls, one hash each.
 
-**It will not create files.** `edit` on a missing path is an error, not a
-create. Use a heredoc; there is nothing to batch and nothing to verify.
+**Existing files only.** `edit` on a missing path is an error. Create the file
+with a heredoc or Write; a new file has nothing to batch and nothing yet to
+check.
 
 ## Tests
 

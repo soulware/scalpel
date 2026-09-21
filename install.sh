@@ -50,19 +50,25 @@ cat <<'BLOCK'
 ## Editing files
 
 `scalpel` batches exact-match edits to one file into a single atomic call,
-guarded by a content hash. Prefer it over the builtin Edit tool for three or
-more changes to the same file, and over `sed -i`, `perl -pi`, and one-off
-Python rewrites always; for one or two edits the builtin Edit renders a better
-diff in review.
+guarded by a content hash. It is a shell command that carries the builtin Edit
+tool's read-before-write check, so it is the answer whether you have been told
+to prefer the builtin tools or to prefer Bash. Use it for every change to an
+existing file, in place of Edit and Write and of `sed -i`, `perl -pi`, and
+one-off Python rewrites. Edit renders a nicer diff for a single change; use
+scalpel anyway and skip the decision. `edit` works on files that already
+exist, so create a new file with a heredoc or Write, where there is nothing
+yet to check.
 
-`scalpel read` prints the hash on its first line, and `edit` refuses to run
-without it: pass it back as `--expect-hash`, or take the one printed on the
-last line of the previous edit. `--unchecked` waives the check, for a file
-nothing else can have touched. `--dry-run` shows the diff and writes nothing,
-for checking a large batch first.
-
-`scalpel read FILE --lines A-B,C-D` prints several windows under one hash.
-Reach for it instead of `sed -n 'A,Bp'` on a file too long to read whole.
+Read with `scalpel read` rather than the builtin Read or `cat`, and with
+`--lines A-B,C-D` rather than `sed -n` on a file too long to read whole: it
+prints the hash on its first line, and `edit` demands it. Pass it back as
+`--expect-hash`, or take the one printed on the last line of the previous
+edit. The hash must come from a `read` you looked at before writing the edits,
+in an earlier call: that is what proves the file is still the one you read,
+and a `read` run in the same command as the edit proves only that the file
+exists. `--unchecked` waives the check, for a file only you have touched.
+`--dry-run` shows the diff and leaves the file alone, for checking a large
+batch first.
 
 Five ways to say where, all in `scalpel edit --help`:
 
@@ -77,7 +83,7 @@ Five ways to say where, all in `scalpel edit --help`:
 - `last: true` on any anchor takes the final occurrence, for the closing brace
   of a module that has no other context.
 
-Do not guess the input format -- edits are a JSON array on stdin, and
-improvising the shape costs more than the one call to check.
+The input format is in `scalpel edit --help`: edits are a JSON array on stdin,
+and the one call to check costs less than improvising the shape.
 BLOCK
 printf '%s\n' "---------------------------------------------------------------"
