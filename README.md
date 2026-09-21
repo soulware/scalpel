@@ -12,7 +12,8 @@ scalpel --version
 ```
 
 The clone is the install: `install.sh` symlinks into it, so put it somewhere
-that stays. Then paste the block it prints into `~/.claude/CLAUDE.md`. Details
+that stays. Then paste the block it prints,
+[claude-md-block.md](claude-md-block.md), into `~/.claude/CLAUDE.md`. Details
 under [Install](#install).
 
 ## Why
@@ -300,6 +301,10 @@ block for your global `~/.claude/CLAUDE.md` and writes nothing there itself. It
 is printed so that a person can read it before it goes in; a Claude session
 installing scalpel for its user should show the block, then add it to that file
 with their agreement.
+
+The block is [claude-md-block.md](claude-md-block.md). Read it there: running
+`install.sh` to see it also points the `~/.local/bin` link at whichever checkout
+the script was run from.
 
 ## Limits
 
